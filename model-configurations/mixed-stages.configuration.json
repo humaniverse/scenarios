@@ -1,0 +1,88 @@
+{
+  "format": "scenario-designer-models",
+  "schemaVersion": 1,
+  "id": "mixed-stages",
+  "revision": 1,
+  "name": "Different models by stage",
+  "description": "Independent perspectives for exploration and scoring; Fusion for combinations; one model for writing. An illustrative setup, not a benchmark-validated recommendation.",
+  "reviewedAt": "2026-11-17",
+  "kind": "stage-setup",
+  "defaults": {
+    "mode": "individual",
+    "models": ["~anthropic/claude-sonnet-latest"],
+    "writer": "~anthropic/claude-sonnet-latest",
+    "efforts": {
+      "~anthropic/claude-sonnet-latest": "medium"
+    },
+    "fusion": {
+      "type": "preset",
+      "preset": "quality",
+      "models": [
+        "~anthropic/claude-opus-latest",
+        "~openai/gpt-sol-latest",
+        "~google/gemini-pro-latest"
+      ],
+      "effort": "high"
+    }
+  },
+  "stages": {
+    "1": {
+      "mode": "individual",
+      "models": [
+        "~anthropic/claude-sonnet-latest",
+        "~openai/gpt-sol-latest",
+        "~google/gemini-pro-latest"
+      ],
+      "writer": "~anthropic/claude-sonnet-latest",
+      "efforts": {},
+      "fusion": {
+        "type": "preset",
+        "preset": "quality",
+        "models": [
+          "~anthropic/claude-opus-latest",
+          "~openai/gpt-sol-latest",
+          "~google/gemini-pro-latest"
+        ],
+        "effort": "high"
+      }
+    },
+    "2": {
+      "mode": "individual",
+      "models": [
+        "~anthropic/claude-sonnet-latest",
+        "~openai/gpt-sol-latest",
+        "~google/gemini-pro-latest"
+      ],
+      "writer": "~anthropic/claude-sonnet-latest",
+      "efforts": {},
+      "fusion": {
+        "type": "preset",
+        "preset": "quality",
+        "models": [
+          "~anthropic/claude-opus-latest",
+          "~openai/gpt-sol-latest",
+          "~google/gemini-pro-latest"
+        ],
+        "effort": "high"
+      }
+    },
+    "4": "inherit",
+    "5": {
+      "mode": "fusion",
+      "models": ["~anthropic/claude-sonnet-latest"],
+      "writer": "~anthropic/claude-sonnet-latest",
+      "efforts": {},
+      "fusion": {
+        "type": "custom",
+        "preset": "quality",
+        "models": [
+          "~anthropic/claude-opus-latest",
+          "~openai/gpt-sol-latest",
+          "~google/gemini-pro-latest"
+        ],
+        "effort": "provider-default"
+      }
+    },
+    "6": "inherit"
+  }
+}

@@ -63,6 +63,7 @@
     getModels,
     testKey,
     planRequests,
+    taskModelStage,
     responseText,
     isRunnableTask,
     type Model,
@@ -90,10 +91,16 @@
   import {
     FUSION_MODEL,
     requestModels,
-    selectionMode,
+    aiModelStages,
+    resolveModelConfiguration,
+    defaultFusion,
+    copyFusion,
     type ModelMode,
-    type ReasoningEffort
+    type EffortPreference,
+    type FusionConfiguration
   } from '$lib/domain/model-settings';
+  import type { ModelSort, ModelRanking } from '$lib/ai/models';
+  import { configurationSummary } from '$lib/ai/model-configuration';
   import { prerequisiteStage } from '$lib/domain/workflow';
   import PageWalkthrough from '$lib/components/PageWalkthrough.svelte';
   import ExampleJourney from '$lib/components/ExampleJourney.svelte';
@@ -125,7 +132,9 @@
   let catalogueLoaded = $state(false);
   let catalogueGeneration = 0;
   let paidMode = $state<ModelMode>('individual');
-  let paidEfforts = $state<Record<string, ReasoningEffort>>({});
+  let paidEfforts = $state<Record<string, EffortPreference>>({});
+  let paidFusion = $state<FusionConfiguration>(defaultFusion());
+  const rankingRequests = new Map<ModelSort, Promise<ModelRanking>>();
   let paidTask = $state<Task>('drivers');
   let paidTargets = $state<string[] | undefined>();
   let paidContributors = $state<{ modelId: string; included: boolean }[]>([]);
@@ -171,7 +180,7 @@
           retryId,
           paidNarrativeOptions,
           paidChainOptions,
-          { reasoningEfforts: paidEfforts }
+          { reasoningEfforts: paidEfforts, fusion: paidFusion }
         )
       : null
   );
@@ -351,6 +360,7 @@
   async function loadCatalogue() {
     const sessionKey = key.trim();
     const generation = ++catalogueGeneration;
+    rankingRequests.clear();
     catalogueLoading = true;
     catalogueStatus = 'Finding available models…';
     try {
@@ -370,7 +380,38 @@
       if (generation === catalogueGeneration) catalogueLoading = false;
     }
   }
+  async function loadRanking(sort: ModelSort): Promise<ModelRanking> {
+    const sessionKey = key.trim();
+    const generation = catalogueGeneration;
+    if (!catalogueLoaded || catalogueForKey !== sessionKey)
+      throw new Error('Refresh the catalogue before loading rankings.');
+    let request = rankingRequests.get(sort);
+    if (!request) {
+      request = getModels(sessionKey, sort, sort === 'intelligence-high-to-low').then((models) => {
+        if (sessionKey !== key.trim() || generation !== catalogueGeneration)
+          throw new Error('Connection changed.');
+        const seen = new Set<string>();
+        const ids = models
+          .filter((model) => {
+            const identity = model.canonical_slug ?? model.id;
+            if (seen.has(identity)) return false;
+            seen.add(identity);
+            return true;
+          })
+          .map((model) => model.id);
+        return { ids, sort, refreshedAt: new Date().toISOString() };
+      });
+      rankingRequests.set(sort, request);
+    }
+    try {
+      return await request;
+    } catch (error) {
+      if (rankingRequests.get(sort) === request) rankingRequests.delete(sort);
+      throw error;
+    }
+  }
   function keyChanged() {
+    rankingRequests.clear();
     keyStatus = '';
     keyCheckFailed = false;
     verifiedKey = null;
@@ -413,7 +454,7 @@
     void loadCatalogue();
   }
   function settings() {
-    settingsTab = 'connection';
+    settingsTab = (p && aiModelStages.includes(p.stage)) || connected ? 'models' : 'connection';
     dialog = 'settings';
     if (catalogueForKey !== key.trim() && !catalogueLoading) void loadCatalogue();
   }
@@ -433,14 +474,16 @@
       chainOptions ?? {
         mode: savedGeneration?.chainBatch?.kind === 'wildcard' ? 'disruption' : 'standard'
       };
-    paidMode = retry
-      ? retry.modelId === FUSION_MODEL
-        ? 'fusion'
-        : 'individual'
-      : selectionMode(p, String(p.stage));
+    const config =
+      retry?.modelConfiguration ??
+      resolveModelConfiguration(p, String(retry?.stage ?? taskModelStage(task, p.stage)));
+    paidFusion = copyFusion(
+      retry?.modelId === FUSION_MODEL && !retry.modelConfiguration ? defaultFusion() : config.fusion
+    );
+    paidMode = retry ? (retry.modelId === FUSION_MODEL ? 'fusion' : 'individual') : config.mode;
     paidEfforts = {
-      ...p.reasoningEfforts,
-      ...(retry?.reasoningEffort ? { [retry.modelId]: retry.reasoningEffort } : {})
+      ...config.efforts,
+      ...(retry ? { [retry.modelId]: retry.reasoningEffort ?? ('provider-default' as const) } : {})
     };
     paidTargets = targets;
     retryId = retry?.id;
@@ -451,7 +494,11 @@
       ? [retry.modelId]
       : writer && paidMode === 'individual'
         ? [writer]
-        : requestModels(p, p.stage, ['narrative', 'narrative_edit', 'consolidate'].includes(task));
+        : requestModels(
+            p,
+            taskModelStage(task, p.stage),
+            ['narrative', 'narrative_edit', 'consolidate'].includes(task)
+          );
     paidContributors = (models.includes(FUSION_MODEL) ? p.models.slice(0, 1) : models).map(
       (modelId, i) => ({
         modelId,
@@ -482,15 +529,13 @@
         retryId,
         paidNarrativeOptions,
         paidChainOptions,
-        { reasoningEfforts: paidEfforts }
+        { reasoningEfforts: paidEfforts, fusion: paidFusion }
       );
       started = true;
       if (project?.modelSetupStatus === 'skipped')
         change((p) => {
           p.modelSetupStatus = 'configured';
         });
-      if (singleContributor && paidMode === 'individual' && !p?.overrides[String(p?.stage)])
-        change((p) => (p.writer = paidModels[0]));
       dialog = '';
       undoStack = [];
       redoStack = [];
@@ -812,6 +857,7 @@
                   loaded={catalogueLoaded && catalogueForKey === key.trim()}
                   status={catalogueStatus}
                   refresh={loadCatalogue}
+                  {loadRanking}
                 >
                   {#snippet connection()}{@render openRouterConnection()}{/snippet}
                 </ModelSetup>
@@ -899,6 +945,9 @@
                           ? 'budget reservation'
                           : 'estimate'} ${r.estimated.toFixed(5)}
                       </p>
+                      {#if r.modelConfiguration}<p class="small">
+                          Saved selection: {configurationSummary(r.modelConfiguration)}
+                        </p>{/if}
                       {#if r.reasoningEffort || r.resolvedModelId || r.fusionInvoked !== undefined}<p
                           class="small"
                         >
@@ -1079,7 +1128,9 @@
         {change}
         {catalogue}
         loading={catalogueLoading}
-        loaded={catalogueLoaded}
+        loaded={catalogueLoaded && catalogueForKey === key.trim()}
+        initialScope={aiModelStages.includes(p.stage) ? String(p.stage) : 'default'}
+        {loadRanking}
         status={catalogueStatus}
         refresh={loadCatalogue}
       />
@@ -1185,16 +1236,24 @@
       {catalogue}
       selected={paidContributors.filter((c) => c.included).map((c) => c.modelId)}
       mode={paidMode}
+      fusion={paidFusion}
       efforts={paidEfforts}
       multiple={!singleContributor}
       loading={catalogueLoading}
-      loaded={catalogueLoaded}
+      loaded={catalogueLoaded && catalogueForKey === key.trim()}
+      {loadRanking}
       status={catalogueStatus}
       refresh={loadCatalogue}
       onmodels={(ids) => (paidContributors = ids.map((modelId) => ({ modelId, included: true })))}
       onmode={(mode) => (paidMode = mode)}
       oneffort={(id, effort) => (paidEfforts = { ...paidEfforts, [id]: effort })}
+      onfusion={(config) => (paidFusion = copyFusion(config))}
     />
+    {#if paidPlan?.validationErrors.length}<div class="notice review" role="status">
+        <ul>
+          {#each paidPlan.validationErrors as issue}<li>{issue}</li>{/each}
+        </ul>
+      </div>{/if}
     {#if paidTask === 'chains'}
       <p class="chain-generation-summary" role="status">
         <strong
@@ -1305,6 +1364,7 @@
           paidEstimate === null ||
           (paidEstimate !== null && !canSpend(p, paidEstimate)) ||
           !paidPlan?.requests.length ||
+          !!paidPlan?.validationErrors.length ||
           new Set(paidModels).size !== paidModels.length ||
           offline}
         onclick={run}

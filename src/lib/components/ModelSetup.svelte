@@ -8,9 +8,15 @@
     type Project,
     type Change
   } from '$lib/domain/project';
-  import { FUSION_MODEL } from '$lib/domain/model-settings';
+  import {
+    FUSION_MODEL,
+    aiModelStages,
+    requestModels,
+    resolveModelConfiguration
+  } from '$lib/domain/model-settings';
+  import { configurationIssues } from '$lib/ai/model-configuration';
   import { skipModelSetup } from '$lib/domain/workflow';
-  import type { Model } from '$lib/ai/models';
+  import type { Model, RankingLoader } from '$lib/ai/models';
   import { planRequests } from '$lib/ai/openrouter';
   import StageModelSettings from './StageModelSettings.svelte';
   import ExerciseBudget from './ExerciseBudget.svelte';
@@ -23,7 +29,8 @@
     loading,
     loaded,
     status,
-    refresh
+    refresh,
+    loadRanking
   }: {
     p: Project;
     change: Change;
@@ -34,18 +41,23 @@
     loaded: boolean;
     status: string;
     refresh: () => void;
+    loadRanking?: RankingLoader;
   } = $props();
   let heading: HTMLHeadingElement;
   let budgetValid = $state(true);
   // A saved position is restored only once a session key has been checked again.
   const step = $derived(!connected ? 'connection' : p.modelSetupStep);
   const index = $derived(modelSetupSteps.indexOf(step));
-  const selectedModels = $derived(p.modelMode === 'fusion' ? [FUSION_MODEL] : p.models);
+  const selectedModels = $derived(requestModels(p, 1));
   const modelsReady = $derived(
     loaded &&
       !loading &&
       selectedModels.length > 0 &&
-      selectedModels.every((id) => catalogue.some((m) => m.id === id))
+      aiModelStages.every(
+        (stage) =>
+          !configurationIssues(resolveModelConfiguration(p, String(stage)), catalogue, stage !== 6)
+            .length
+      )
   );
   const ready = $derived(
     connected &&
@@ -163,14 +175,25 @@
       </details>
     </div>
     <p class="notice">
-      Generating a starting list of drivers with your current selection: {p.modelMode === 'fusion'
+      Generating a starting list of drivers with your current selection: {selectedModels.includes(
+        FUSION_MODEL
+      )
         ? 'Fusion uses your overall exercise budget; final charges depend on its work'
         : driverEstimate === null
           ? 'connect and load model prices to see an estimate'
           : `estimated allowance $${driverEstimate.toFixed(4)} USD`}. You’ll confirm the actual task
       and spending details before each run; setup does not run a model.
     </p>
-    <StageModelSettings {p} {change} {catalogue} {loading} {loaded} {status} {refresh} />
+    <StageModelSettings
+      {p}
+      {change}
+      {catalogue}
+      {loading}
+      {loaded}
+      {status}
+      {refresh}
+      {loadRanking}
+    />
     {#if !modelsReady}<p class="notice review" role="status">
         {loading
           ? 'Loading the models available to your account…'

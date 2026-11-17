@@ -193,3 +193,33 @@ describe('compatible exercise preferences', () => {
     expect(canSpend(p, 0.01)).toBe(false);
   });
 });
+
+describe('ranked discovery contracts', () => {
+  it('uses the scored-only intelligence filter and preserves canonical identities without inventing scores', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ data: [{ ...model('example/new'), canonical_slug: 'example/pinned' }] })
+        )
+      );
+    vi.stubGlobal('fetch', fetcher);
+    const models = await getModels('session-key', 'intelligence-high-to-low', true);
+    const url = new URL(fetcher.mock.calls[0][0]);
+    expect(url.searchParams.get('min_intelligence_index')).toBe('0');
+    expect(url.searchParams.get('sort')).toBe('intelligence-high-to-low');
+    expect(models[0].canonical_slug).toBe('example/pinned');
+    expect(models[0]).not.toHaveProperty('score');
+  });
+  it('requests throughput and latency orders using the authenticated catalogue', async () => {
+    for (const sort of ['throughput-high-to-low', 'latency-low-to-high'] as const) {
+      const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [model()] })));
+      vi.stubGlobal('fetch', fetcher);
+      await getModels('session-key', sort);
+      const url = new URL(fetcher.mock.calls[0][0]);
+      expect(url.pathname).toBe('/api/v1/models/user');
+      expect(url.searchParams.get('sort')).toBe(sort);
+      expect(url.searchParams.has('min_intelligence_index')).toBe(false);
+    }
+  });
+});

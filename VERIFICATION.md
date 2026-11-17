@@ -1,6 +1,16 @@
 # Quick Mode implementation verification
 
-Latest review: 12 November 2026. Earlier sections record their original checks. This records checks actually performed; it is not a certification or a completed analyst pilot. Research requirements in the original acceptance checklist are intentionally outside this implementation's scope.
+Latest review: 17 November 2026. Earlier sections record their original checks. This records checks actually performed; it is not a certification or a completed analyst pilot. Research requirements in the original acceptance checklist are intentionally outside this implementation's scope.
+
+## Model picker: Chrome verification — 17 November 2026
+
+- Opened the actual application modules in Google Chrome using a self-contained local build under ignored `output/browser-check/`. The normal local preview server could not bind a port (`listen EPERM`), so this check does not cover HTTP deployment, production CSP or service-worker behaviour.
+- Verified the authored example workflow, opening model settings from Explore drivers with that stage focused, replacing only the exploration model, and Undo restoring its inherited Sonnet/Medium selection while other stage assignments stayed unchanged.
+- Loaded live public OpenRouter catalogue metadata and the Fast and Smartest tabs. Fast returned 355 eligible catalogue entries in throughput order; Smartest returned 58 scored entries, with ten initially displayed and a successful retrieval timestamp. These are observed counts, not stable test expectations or benchmark scores. The selected model was preserved while changing discovery tabs.
+- Verified selecting exploration, assessment and writing for a bulk draft; adding a second independent model; and Apply being disabled with an explicit writing-model-choice requirement. The draft did not alter the saved stage rows. Escape closed the dialog and returned focus to its opener.
+- Opened the bundled library and inspected all five named configuration entries. Chrome's console showed zero messages during the checked flows. Native dropdown/file-chooser interactions and a complete apply/export/import cycle could not be driven reliably with the available native UI automation, so they are not claimed as browser-verified. Automated tests cover the configuration and request contracts.
+- Found and corrected inherited-status text running into stage names, and checkbox labels inheriting a vertical direction. These are CSS-only corrections; full narrow-screen and zoom acceptance remains outstanding.
+- No API key was entered and no paid inference request was made. Automatic Briefcase ingestion remains disabled pending a permitted feed and publication rights. The application has 308 passing automated tests; subsequent CSS changes do not alter those tested contracts.
 
 ## PDF and Word report redesign — 12 November 2026
 

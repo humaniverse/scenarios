@@ -1,0 +1,28 @@
+{
+  "format": "scenario-designer-models",
+  "schemaVersion": 1,
+  "id": "starter",
+  "revision": 1,
+  "name": "Single-model starter",
+  "description": "One model throughout. Tracks the provider\u2019s latest Sonnet release.",
+  "reviewedAt": "2026-11-17",
+  "kind": "panel",
+  "configuration": {
+    "mode": "individual",
+    "models": ["~anthropic/claude-sonnet-latest"],
+    "writer": "~anthropic/claude-sonnet-latest",
+    "efforts": {
+      "~anthropic/claude-sonnet-latest": "medium"
+    },
+    "fusion": {
+      "type": "preset",
+      "preset": "quality",
+      "models": [
+        "~anthropic/claude-opus-latest",
+        "~openai/gpt-sol-latest",
+        "~google/gemini-pro-latest"
+      ],
+      "effort": "high"
+    }
+  }
+}

@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import { defaultModels, modelModeSchema, effortSchema } from './model-settings';
+import {
+  defaultModels,
+  modelModeSchema,
+  effortSchema,
+  effortPreferenceSchema,
+  fusionSchema,
+  configurationSchema,
+  configurationProvenanceSchema
+} from './model-settings';
 export { defaultModels, modelName } from './model-settings';
 
 export const stages = [
@@ -193,6 +201,7 @@ export const runSchema = z.object({
   reasoningEffort: effortSchema.optional(),
   resolvedModelId: z.string().optional(),
   fusionInvoked: z.boolean().optional(),
+  modelConfiguration: configurationSchema.optional(),
   costBasis: z.enum(['estimate', 'allowance']).optional(),
   inputRevision: z.number(),
   status: z.enum(['queued', 'running', 'succeeded', 'failed', 'cancelled', 'skipped']),
@@ -237,7 +246,14 @@ export const projectSchema = z.object({
   writer: z.string(),
   modelMode: modelModeSchema.default('individual'),
   modelModeOverrides: z.record(z.string(), modelModeSchema).default({}),
-  reasoningEfforts: z.record(z.string(), effortSchema).default({}),
+  reasoningEfforts: z.record(z.string(), effortPreferenceSchema).default({}),
+  stageReasoningEfforts: z
+    .record(z.string(), z.record(z.string(), effortPreferenceSchema))
+    .default({}),
+  stageEffortInheritance: z.record(z.string(), z.boolean()).default({}),
+  fusion: fusionSchema.optional(),
+  fusionOverrides: z.record(z.string(), fusionSchema).default({}),
+  configurationProvenance: z.record(z.string(), configurationProvenanceSchema).default({}),
   // Legacy generation targets: retained for version 1.0 backup compatibility only.
   mainCount: z.number().int().min(1).max(12),
   wildcardCount: z.number().int().min(0).max(6),
@@ -387,6 +403,10 @@ export function newProject(): Project {
     writer: defaultModels[0],
     modelMode: 'individual',
     modelModeOverrides: {},
+    stageReasoningEfforts: {},
+    stageEffortInheritance: {},
+    fusionOverrides: {},
+    configurationProvenance: {},
     reasoningEfforts: { [defaultModels[0]]: 'medium' },
     mainCount: 3,
     wildcardCount: 0,

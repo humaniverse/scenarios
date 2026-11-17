@@ -3544,3 +3544,183 @@ body .driver-popover.page-walkthrough {
 .research-context > label {
   display: block;
 }
+
+/* The model overview is visible in setup and settings; its editor never hides it. */
+.stage-model-table {
+  border: 1px solid var(--cg-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.stage-model-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 14px;
+  border-bottom: 1px solid var(--cg-border);
+}
+.stage-model-row:last-child {
+  border-bottom: 0;
+}
+.stage-model-row.editing {
+  background: var(--cg-selection);
+}
+.stage-model-row > input,
+.inline-checkbox input,
+.configuration-preview-targets input {
+  width: 18px;
+  height: 18px;
+  margin: 4px 0;
+  flex-shrink: 0;
+  accent-color: var(--cg-action);
+}
+.stage-model-row p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+.stage-model-row > div > strong {
+  display: block;
+}
+.stage-model-row .stage-model-source {
+  display: inline-block;
+  margin-top: 4px;
+}
+.stage-model-row-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.stage-model-editor {
+  border: 1px solid var(--cg-border);
+  border-radius: 8px;
+  padding: 18px;
+  margin: 20px 0;
+  min-width: 0;
+}
+.stage-model-editor > h3 {
+  margin-top: 0;
+}
+.configuration-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 16px 0;
+}
+.inline-checkbox {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-weight: 400;
+  margin: 0;
+}
+.picker-result > .picker-result-actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.picker-filter-tabs {
+  display: flex;
+  flex-wrap: wrap;
+}
+.configuration-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.configuration-chips > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--cg-border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  max-width: 100%;
+}
+.configuration-chips > span > span {
+  overflow-wrap: anywhere;
+}
+.configuration-chips strong,
+.configuration-chips small {
+  display: block;
+}
+.fusion-controls > label {
+  margin: 16px 0;
+}
+.model-configurations {
+  border-top: 1px solid var(--cg-border);
+  margin-top: 24px;
+  padding-top: 8px;
+}
+.configuration-upload {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+  cursor: pointer;
+  margin: 0;
+}
+.configuration-upload input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.configuration-upload:focus-within {
+  outline: 2px solid var(--cg-action);
+  outline-offset: 3px;
+}
+.configuration-library {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 12px;
+}
+.configuration-library article,
+.configuration-preview {
+  border: 1px solid var(--cg-border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.configuration-preview {
+  margin-top: 16px;
+}
+.configuration-preview-targets > div {
+  border-bottom: 1px solid var(--cg-border);
+  padding: 12px 0;
+}
+.configuration-preview-targets label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.configuration-preview-targets p {
+  overflow-wrap: anywhere;
+}
+.configuration-repair {
+  border: 1px solid var(--cg-border);
+  padding: 12px;
+  margin: 16px 0;
+}
+@media (max-width: 640px) {
+  .stage-model-row {
+    grid-template-columns: 22px minmax(0, 1fr);
+  }
+  .stage-model-row-actions {
+    grid-column: 2;
+  }
+  .stage-model-editor {
+    padding: 12px;
+  }
+  .picker-result > .picker-result-actions {
+    flex-basis: 100%;
+  }
+  .model-mode-options {
+    grid-template-columns: 1fr;
+  }
+}

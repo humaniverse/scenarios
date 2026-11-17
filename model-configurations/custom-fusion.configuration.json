@@ -1,0 +1,26 @@
+{
+  "format": "scenario-designer-models",
+  "schemaVersion": 1,
+  "id": "custom-fusion",
+  "revision": 1,
+  "name": "Custom Fusion panel",
+  "description": "An editable three-developer Fusion panel with provider-default shared effort. Costs vary.",
+  "reviewedAt": "2026-11-17",
+  "kind": "panel",
+  "configuration": {
+    "mode": "fusion",
+    "models": ["~anthropic/claude-sonnet-latest"],
+    "writer": "~anthropic/claude-sonnet-latest",
+    "efforts": {},
+    "fusion": {
+      "type": "custom",
+      "preset": "quality",
+      "models": [
+        "~anthropic/claude-opus-latest",
+        "~openai/gpt-sol-latest",
+        "~google/gemini-pro-latest"
+      ],
+      "effort": "provider-default"
+    }
+  }
+}
