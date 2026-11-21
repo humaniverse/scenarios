@@ -10,6 +10,7 @@
     assignConfiguration,
     displayModelName,
     copyFusion,
+    fusionPlugin,
     type ModelConfiguration,
     type ModelMode,
     type EffortPreference,
@@ -19,7 +20,9 @@
   import { configurationIssues, configurationSummary } from '$lib/ai/model-configuration';
   import type { Model, RankingLoader } from '$lib/ai/models';
   import ModelPicker from './ModelPicker.svelte';
+  import type { ModelBrowserView } from './ModelBrowser.svelte';
   import ModelConfigurations from './ModelConfigurations.svelte';
+
   let {
     p,
     change,
@@ -41,66 +44,58 @@
     loadRanking?: RankingLoader;
     initialScope?: string;
   } = $props();
+
+  const uid = $props.id();
+  const stageScopes = aiModelStages.map(String);
+  const scopes = ['default', ...stageScopes];
   let editing = $state('default');
+  let selecting = $state(false);
   let targets = $state<string[]>([]);
   let bulk = $state<ModelConfiguration | null>(null);
   let bulkWriter = $state('');
   let previous = $state<ModelPreferences | null>(null);
+  let feedback = $state('');
   let heading = $state<HTMLHeadingElement>();
-  const scopes = ['default', ...aiModelStages.map(String)];
+  let bulkHeading = $state<HTMLHeadingElement>();
+  let multipleButton = $state<HTMLButtonElement>();
+  let browseView = $state<ModelBrowserView>('suggested');
+  let browseSearch = $state('');
+
   const title = (scope: string) =>
-    scope === 'default'
-      ? 'Whole-analysis defaults'
-      : scope === 'bulk'
-        ? 'Selected stages'
-        : stages[Number(scope)];
-  const name = (id: string) => displayModelName(id, catalogue.find((m) => m.id === id)?.name);
-  const active = $derived(
-    editing === 'bulk' && bulk ? bulk : resolveModelConfiguration(p, editing)
-  );
+    scope === 'default' ? 'Default models for all stages' : stages[Number(scope)];
+  const modelLookup = $derived(new Map(catalogue.map((model) => [model.id, model.name])));
+  const name = (id: string) => displayModelName(id, modelLookup.get(id));
+  const active = $derived(bulk ?? resolveModelConfiguration(p, editing || 'default'));
   const needsWriter = $derived(
-    editing === 'bulk' &&
-      targets.includes('6') &&
-      active.mode === 'individual' &&
-      active.models.length > 1
+    !!bulk && targets.includes('6') && active.mode === 'individual' && active.models.length > 1
   );
-  const defaultAffected = $derived(
-    aiModelStages
-      .filter((stage) => {
-        const key = String(stage);
-        return (
-          !Object.hasOwn(p.modelModeOverrides, key) ||
-          (resolveModelConfiguration(p, key).mode === 'fusion'
-            ? !Object.hasOwn(p.fusionOverrides, key)
-            : !Object.hasOwn(p.overrides, key))
-        );
-      })
-      .map((stage) => stages[stage])
-  );
-  const bulkIssues = $derived.by(() => {
-    if (!bulk || editing !== 'bulk') return [];
-    if (needsWriter && !bulkWriter) return ['Choose one writing model before applying this panel.'];
-    const candidate = JSON.parse(JSON.stringify(p)) as Project;
-    const config = {
+  const proposed = $derived(
+    bulk && {
       ...bulk,
       writer: needsWriter ? bulkWriter : bulk.models.length === 1 ? bulk.models[0] : bulk.writer
-    };
-    const errors: string[] = [];
-    for (const scope of targets) {
-      assignConfiguration(candidate, scope, config);
-      errors.push(
-        ...configurationIssues(
-          resolveModelConfiguration(candidate, scope),
-          catalogue,
-          scope !== '6'
-        )
-      );
     }
-    return [...new Set(errors)];
+  );
+  const preview = $derived.by(() => {
+    if (!proposed) return { rows: [], issues: [] };
+    const candidate = snapshot();
+    const issues: string[] = [];
+    const rows = targets.map((scope) => {
+      if (scope === '6' && needsWriter && !bulkWriter) {
+        issues.push('Choose one writing model before applying.');
+        return { scope, summary: 'Choose a writing model' };
+      }
+      assignConfiguration(candidate, scope, proposed);
+      const config = resolveModelConfiguration(candidate, scope);
+      if (loaded) issues.push(...configurationIssues(config, catalogue, scope !== '6'));
+      return { scope, summary: configurationSummary(config, name) };
+    });
+    return { rows, issues: [...new Set(issues)] };
   });
-  $effect(() => {
+
+  $effect.pre(() => {
     editing = initialScope;
   });
+
   function snapshot(): ModelPreferences {
     return JSON.parse(
       JSON.stringify({
@@ -118,272 +113,429 @@
       })
     );
   }
-  const commit: Change = (fn, message) => {
+
+  function effectiveSelection(project: ModelPreferences, scope: string) {
+    const config = resolveModelConfiguration(project, scope);
+    return JSON.stringify(
+      config.mode === 'fusion'
+        ? fusionPlugin(config.fusion)
+        : {
+            models: config.models,
+            writer: config.writer,
+            efforts: [...config.models, config.writer].map((id) => config.efforts[id])
+          }
+    );
+  }
+
+  const commit: Change = (fn, message = 'Model settings updated.') => {
     previous = snapshot();
-    change(fn, message ?? 'Model settings updated.');
+    const before = stageScopes.map((scope) => effectiveSelection(p, scope));
+    const defaultsBefore = effectiveSelection(p, 'default');
+    const writerBefore = p.writer;
+    change((project) => {
+      fn(project);
+      const affected = stageScopes.filter(
+        (scope, i) => effectiveSelection(project, scope) !== before[i]
+      );
+      feedback =
+        writerBefore === project.writer && defaultsBefore === effectiveSelection(project, 'default')
+          ? message
+          : affected.length
+            ? `${message} Updated settings for ${affected.map(title).join(', ')}.`
+            : `${message} All stages keep their current selections.`;
+    }, message);
   };
-  function undo() {
+
+  async function undo() {
     if (!previous) return;
     const saved = JSON.parse(JSON.stringify(previous)) as ModelPreferences;
-    change((p) => {
-      p.models = saved.models;
-      p.writer = saved.writer;
-      p.overrides = saved.overrides;
-      p.modelMode = saved.modelMode;
-      p.modelModeOverrides = saved.modelModeOverrides;
-      p.reasoningEfforts = saved.reasoningEfforts ?? {};
-      p.stageReasoningEfforts = saved.stageReasoningEfforts ?? {};
-      p.stageEffortInheritance = saved.stageEffortInheritance ?? {};
-      p.fusion = saved.fusion;
-      p.fusionOverrides = saved.fusionOverrides ?? {};
-      p.configurationProvenance = saved.configurationProvenance ?? {};
+    change((project) => {
+      project.models = saved.models;
+      project.writer = saved.writer;
+      project.overrides = saved.overrides;
+      project.modelMode = saved.modelMode;
+      project.modelModeOverrides = saved.modelModeOverrides;
+      project.reasoningEfforts = saved.reasoningEfforts ?? {};
+      project.stageReasoningEfforts = saved.stageReasoningEfforts ?? {};
+      project.stageEffortInheritance = saved.stageEffortInheritance ?? {};
+      project.fusion = saved.fusion;
+      project.fusionOverrides = saved.fusionOverrides ?? {};
+      project.configurationProvenance = saved.configurationProvenance ?? {};
     }, 'Undid the last model-settings change.');
     previous = null;
+    feedback = 'Undid the last model-settings change.';
+    await tick();
+    if (selecting) bulkHeading?.focus();
+    else if (editing) heading?.focus();
+    else multipleButton?.focus();
   }
+
   async function edit(scope: string) {
     editing = scope;
     await tick();
-    heading?.focus({ preventScroll: true });
+    heading?.focus();
   }
+
+  function selectRow(event: MouseEvent, scope: string) {
+    if ((event.target as Element).closest('button, input, label')) return;
+    if (!selecting) {
+      void edit(scope);
+    } else if (!bulk && scope !== 'default') {
+      targets = targets.includes(scope)
+        ? targets.filter((target) => target !== scope)
+        : [...targets, scope];
+    }
+  }
+
+  async function closeEditor() {
+    const scope = editing;
+    editing = '';
+    await tick();
+    document.getElementById(`${uid}-stage-${scope}`)?.focus();
+  }
+
   function models(ids: string[]) {
     if (!ids.length) return;
-    if (editing === 'bulk' && bulk) {
+    if (bulk) {
+      if (!ids.includes(bulkWriter)) bulkWriter = '';
       bulk = { ...bulk, models: ids };
-      bulkWriter = '';
       return;
     }
     const scope = editing;
-    commit((p) => {
-      if (scope === 'default') p.models = [...ids];
-      else p.overrides[scope] = [...ids];
-    });
+    commit(
+      (project) => {
+        if (scope === 'default') project.models = [...ids];
+        else project.overrides[scope] = [...ids];
+      },
+      scope === 'default'
+        ? 'Exercise default models updated.'
+        : `Models updated for ${title(scope)}.`
+    );
   }
+
   function mode(value: ModelMode) {
-    if (editing === 'bulk' && bulk) {
+    if (bulk) {
       bulk = { ...bulk, mode: value };
       return;
     }
     const scope = editing;
-    commit((p) => {
-      if (scope === 'default') p.modelMode = value;
-      else p.modelModeOverrides[scope] = value;
-    });
+    commit(
+      (project) => {
+        if (scope === 'default') project.modelMode = value;
+        else project.modelModeOverrides[scope] = value;
+      },
+      scope === 'default'
+        ? 'Default contribution mode updated.'
+        : `Contribution mode updated for ${title(scope)}.`
+    );
   }
+
   function effort(id: string, value: EffortPreference) {
-    if (editing === 'bulk' && bulk) {
+    if (bulk) {
       bulk = { ...bulk, efforts: { ...bulk.efforts, [id]: value } };
       return;
     }
     const scope = editing;
-    commit((p) => {
-      if (scope === 'default') p.reasoningEfforts[id] = value;
-      else (p.stageReasoningEfforts[scope] ??= {})[id] = value;
-    });
+    commit(
+      (project) => {
+        if (scope === 'default') project.reasoningEfforts[id] = value;
+        else (project.stageReasoningEfforts[scope] ??= {})[id] = value;
+      },
+      `Thinking effort updated for ${name(id)}.`
+    );
   }
+
   function fusion(value: FusionConfiguration) {
-    if (editing === 'bulk' && bulk) {
+    if (bulk) {
       bulk = { ...bulk, fusion: copyFusion(value) };
       return;
     }
     const scope = editing;
-    commit((p) => {
-      if (scope === 'default') p.fusion = copyFusion(value);
-      else p.fusionOverrides[scope] = copyFusion(value);
-    });
+    commit(
+      (project) => {
+        if (scope === 'default') project.fusion = copyFusion(value);
+        else project.fusionOverrides[scope] = copyFusion(value);
+      },
+      scope === 'default'
+        ? 'Default Fusion settings updated.'
+        : `Fusion settings updated for ${title(scope)}.`
+    );
   }
-  function beginBulk() {
-    bulk = resolveModelConfiguration(p, editing === 'bulk' ? 'default' : editing);
+
+  async function selectStages() {
+    selecting = true;
+    await tick();
+    bulkHeading?.focus();
+  }
+
+  async function beginBulk() {
+    if (!targets.length) return;
+    bulk = resolveModelConfiguration(p, editing || 'default');
     bulkWriter = '';
-    editing = 'bulk';
+    await tick();
+    heading?.focus();
   }
+
+  async function endBulk(nextScope = editing) {
+    selecting = false;
+    bulk = null;
+    targets = [];
+    editing = nextScope;
+    await tick();
+    if (editing) heading?.focus();
+    else multipleButton?.focus();
+  }
+
   function applyBulk() {
-    if (!bulk || !targets.length || bulkIssues.length || !loaded) return;
-    const config = JSON.parse(
-      JSON.stringify({
-        ...bulk,
-        writer: needsWriter ? bulkWriter : bulk.models.length === 1 ? bulk.models[0] : bulk.writer
-      })
-    ) as ModelConfiguration;
+    if (!proposed || !targets.length || preview.issues.length || !loaded || loading) return;
+    const config = JSON.parse(JSON.stringify(proposed)) as ModelConfiguration;
     const selected = [...targets];
     commit(
-      (p) => {
-        for (const scope of selected) assignConfiguration(p, scope, config);
+      (project) => {
+        for (const scope of selected) assignConfiguration(project, scope, config);
       },
       `Updated models for ${selected.map(title).join(', ')}.`
     );
-    editing = selected[0];
-    bulk = null;
-    targets = [];
+    void endBulk(selected[0]);
+  }
+
+  function resetSelected() {
+    const selected = [...targets];
+    commit(
+      (project) => selected.forEach((scope) => resetStageModels(project, scope)),
+      'Selected stages now follow defaults.'
+    );
+    void endBulk(selected[0]);
+  }
+
+  function reset(scope: string) {
+    commit((project) => resetStageModels(project, scope), `${title(scope)} now follows defaults.`);
+    void edit(scope);
+  }
+
+  function changeWriter(id: string) {
+    commit((project) => (project.writer = id), 'Default writing model updated.');
   }
 </script>
 
-<section class="stage-model-overview" aria-label="Models by analysis stage">
-  <div class="section-line">
-    <div>
-      <h3>Models for your analysis</h3>
-      <p class="small muted">
-        Edit a row directly, or select several stages and configure them together. Changes save
-        automatically; they never run models.
-      </p>
+{#snippet editor()}
+  <section id={`${uid}-editor`} class="stage-model-editor" aria-labelledby={`${uid}-editor-title`}>
+    <div class="section-line">
+      <h3 tabindex="-1" id={`${uid}-editor-title`} bind:this={heading}>
+        {bulk ? 'Edit selected stages' : title(editing)}
+      </h3>
+      {#if !bulk}
+        <button
+          type="button"
+          class="text-button small close-stage-model-editor"
+          onclick={closeEditor}>Close editor</button
+        >
+      {/if}
     </div>
-    {#if previous}<button type="button" class="secondary small" onclick={undo}
-        ><Undo2 size={15} /> Undo settings change</button
-      >{/if}
+    {#if bulk}
+      <p class="small muted">
+        Started from {title(editing || 'default')}. Review the proposed assignments before applying.
+      </p>
+    {:else if editing === 'default'}
+      <p class="small muted">
+        Changes save automatically and apply wherever a stage follows these defaults.
+      </p>
+    {:else}
+      <p class="small muted">
+        {hasStageModels(p, editing) ? 'Customized for this stage.' : 'Follows exercise defaults.'}
+        Changes save automatically for this stage.
+      </p>
+    {/if}
+    <ModelPicker
+      {catalogue}
+      selected={active.models}
+      writer={!bulk && editing === 'default' ? p.writer : undefined}
+      mode={active.mode}
+      efforts={active.efforts}
+      fusion={active.fusion}
+      multiple={!!bulk || editing !== '6'}
+      {loading}
+      {loaded}
+      {status}
+      {refresh}
+      {loadRanking}
+      bind:browseView
+      bind:browseSearch
+      onmodels={models}
+      onwriter={changeWriter}
+      onmode={mode}
+      oneffort={effort}
+      onfusion={fusion}
+    />
+    {#if bulk}
+      {#if needsWriter}
+        <label class="stage-writing-model"
+          >Writing model for the selected stages
+          <select bind:value={bulkWriter}>
+            <option value="">Choose one writing model…</option>
+            {#each active.models as id}<option value={id}>{name(id)}</option>{/each}
+          </select>
+        </label>
+      {/if}
+      <div class="bulk-model-preview">
+        <h4>Proposed assignments</h4>
+        <dl>
+          {#each preview.rows as row (row.scope)}
+            <div>
+              <dt>{title(row.scope)}</dt>
+              <dd>{row.summary}</dd>
+            </div>
+          {/each}
+        </dl>
+      </div>
+      {#if preview.issues.length}
+        <div class="notice review" role="status">
+          <ul>
+            {#each preview.issues as issue}<li>{issue}</li>{/each}
+          </ul>
+        </div>
+      {/if}
+      {#if !loaded}<p class="small muted">
+          Load the model catalogue to check these assignments before applying.
+        </p>{/if}
+      <div class="dialog-actions">
+        <button type="button" class="secondary" onclick={() => endBulk()}>Cancel bulk edit</button>
+        <button
+          type="button"
+          class="primary"
+          disabled={!loaded || loading || !targets.length || !!preview.issues.length}
+          onclick={applyBulk}>Apply to selected stages</button
+        >
+      </div>
+    {/if}
+  </section>
+{/snippet}
+
+<section class="stage-model-workspace" aria-label="Models by analysis stage">
+  <div class="section-line stage-model-toolbar">
+    <h3>Models by stage</h3>
+    <div>
+      {#if !selecting}
+        <button
+          type="button"
+          class="secondary small"
+          bind:this={multipleButton}
+          onclick={selectStages}>Edit multiple stages</button
+        >
+      {/if}
+      {#if previous}
+        <button type="button" class="text-button small" onclick={undo}>
+          <Undo2 size={15} aria-hidden="true" /> Undo settings change
+        </button>
+      {/if}
+    </div>
   </div>
-  <div class="stage-model-table">
-    {#each scopes as scope}
+  <p class="small stage-model-feedback" role="status">{feedback}</p>
+  {#if selecting && !bulk}
+    <div class="configuration-toolbar">
+      <h4 tabindex="-1" bind:this={bulkHeading}>Choose stages to edit</h4>
+      <label class="inline-checkbox">
+        <input
+          type="checkbox"
+          checked={targets.length === stageScopes.length}
+          onchange={(event) => (targets = event.currentTarget.checked ? [...stageScopes] : [])}
+        />
+        Select all stages
+      </label>
+    </div>
+  {/if}
+  <div class="stage-model-grid">
+    {#each scopes as scope, i (scope)}
       {@const config = resolveModelConfiguration(p, scope)}
+      {@const customized = scope !== 'default' && hasStageModels(p, scope)}
+      {@const activeRow = !selecting && editing === scope}
       {@const errors = loaded ? configurationIssues(config, catalogue, scope === 'default') : []}
-      <div class="stage-model-row" class:editing={editing === scope}>
-        {#if scope !== 'default'}<input
+      <div
+        class="stage-model-row"
+        class:editing={activeRow}
+        class:selectable={!selecting || (!bulk && scope !== 'default')}
+        style:--stage-row={i + 1}
+        role="presentation"
+        onclick={(event) => selectRow(event, scope)}
+      >
+        {#if selecting && !bulk && scope !== 'default'}
+          <input
             type="checkbox"
-            aria-label={`Select ${title(scope)} for bulk assignment`}
+            aria-label={`Select ${title(scope)}`}
             checked={targets.includes(scope)}
-            onchange={(e) =>
-              (targets = e.currentTarget.checked
+            onchange={(event) =>
+              (targets = event.currentTarget.checked
                 ? [...targets, scope]
-                : targets.filter((s) => s !== scope))}
-          />{:else}<span aria-hidden="true"></span>{/if}
-        <div>
-          <strong>{title(scope)}</strong><span
-            class="stage-model-source"
-            class:customized={scope !== 'default' && hasStageModels(p, scope)}
-            >{scope === 'default'
+                : targets.filter((target) => target !== scope))}
+          />
+        {/if}
+        <div class="stage-model-summary">
+          <strong>{title(scope)}</strong>
+          <span class="small stage-model-source muted">
+            {scope === 'default'
               ? 'Shared settings'
-              : hasStageModels(p, scope)
-                ? 'Custom settings · other fields may inherit'
-                : 'Follows defaults'}</span
-          >
+              : customized
+                ? 'Customized'
+                : 'Follows defaults'}
+          </span>
           <p>{configurationSummary(config, name)}</p>
-          {#if scope === 'default' && config.mode === 'individual'}<p class="small muted">
-              Default writing model: {name(p.writer)}
-            </p>{/if}
-          {#if errors.length}<p class="small picker-unavailable">
+          {#if scope === 'default' && config.mode === 'individual'}
+            <p class="small muted">Writing uses {name(p.writer)}</p>
+          {/if}
+          {#if errors.length}
+            <p class="small picker-unavailable">
               {errors[0]}{errors.length > 1 ? ` (+${errors.length - 1} more)` : ''}
-            </p>{/if}
-          {#if p.configurationProvenance[scope]}<p class="small muted">
+            </p>
+          {/if}
+          {#if p.configurationProvenance[scope]}
+            <p class="small muted">
               Based on {p.configurationProvenance[scope].name}, revision {p.configurationProvenance[
                 scope
               ].revision}
-            </p>{/if}
+            </p>
+          {/if}
         </div>
-        <div class="stage-model-row-actions">
-          <button
-            type="button"
-            class="secondary small"
-            aria-label={`Edit models for ${title(scope)}`}
-            aria-expanded={editing === scope}
-            onclick={() => edit(scope)}>Edit</button
-          >
-          {#if scope !== 'default' && hasStageModels(p, scope)}<button
+        {#if !selecting}
+          <div class="stage-model-row-actions">
+            <button
+              id={`${uid}-stage-${scope}`}
               type="button"
-              class="text-button small"
-              onclick={() =>
-                commit((p) => resetStageModels(p, scope), `${title(scope)} now follows defaults.`)}
-              >Use defaults</button
-            >{/if}
-        </div>
+              class="secondary small"
+              aria-label={`Edit models for ${title(scope)}`}
+              aria-expanded={activeRow}
+              aria-controls={activeRow ? `${uid}-editor` : undefined}
+              onclick={() => edit(scope)}>Edit</button
+            >
+            {#if customized}
+              <button
+                type="button"
+                class="text-button small"
+                onclick={() => reset(scope)}
+                aria-label={`Use defaults for ${title(scope)}`}>Use defaults</button
+              >
+            {/if}
+          </div>
+        {/if}
       </div>
+      {#if activeRow}{@render editor()}{/if}
     {/each}
+    {#if selecting && !bulk}
+      <div class="configuration-toolbar bulk-model-actions">
+        <button class="secondary small" type="button" onclick={() => endBulk()}>Cancel</button>
+        <button
+          class="text-button small"
+          type="button"
+          disabled={!targets.length}
+          onclick={resetSelected}>Use defaults for selected stages</button
+        >
+        <button class="primary small" type="button" disabled={!targets.length} onclick={beginBulk}>
+          Configure {targets.length ? targets.length : 'selected'}
+          {targets.length === 1 ? 'stage' : 'stages'}
+        </button>
+      </div>
+    {/if}
+    {#if bulk}{@render editor()}{/if}
   </div>
-  <div class="configuration-toolbar">
-    <label class="inline-checkbox"
-      ><input
-        type="checkbox"
-        checked={targets.length === aiModelStages.length}
-        onchange={(e) => (targets = e.currentTarget.checked ? aiModelStages.map(String) : [])}
-      /> Select all stages</label
-    >
-    <button class="secondary small" type="button" disabled={!targets.length} onclick={beginBulk}
-      >Configure {targets.length || 'selected'} stages together</button
-    >
-    <button
-      class="text-button small"
-      type="button"
-      disabled={!targets.length}
-      onclick={() => {
-        const selected = [...targets];
-        commit(
-          (p) => selected.forEach((s) => resetStageModels(p, s)),
-          'Selected stages now follow defaults.'
-        );
-      }}>Use defaults for selected stages</button
-    >
-  </div>
-</section>
-<section class="stage-model-editor" aria-label={`Edit ${title(editing)}`}>
-  <h3 tabindex="-1" bind:this={heading}>{title(editing)}</h3>
-  {#if editing === 'default'}<p class="small muted">
-      Updates can affect inherited fields in: {defaultAffected.join(', ') || 'no stages'}. Custom
-      fields stay as saved.
-    </p>
-    <label
-      >Default writing model<select
-        value={p.writer}
-        onchange={(e) => {
-          const id = e.currentTarget.value;
-          commit((p) => (p.writer = id));
-        }}
-        ><option value={p.writer}>{name(p.writer)}</option
-        >{#each catalogue.filter((m) => !m.id.startsWith('openrouter/fusion') && m.id !== p.writer) as model}<option
-            value={model.id}>{name(model.id)}</option
-          >{/each}</select
-      ></label
-    >
-  {:else if editing === 'bulk'}<p class="small">
-      Targets: {targets.map(title).join(', ') || 'Select at least one stage above.'} Changes in this editor
-      are applied together when you choose Apply.
-    </p>
-  {:else}<p class="small muted">
-      Editing creates only the necessary stage override. Use defaults above to restore all inherited
-      settings.
-    </p>{/if}
-  <ModelPicker
-    {catalogue}
-    selected={active.models}
-    mode={active.mode}
-    efforts={active.efforts}
-    fusion={active.fusion}
-    multiple={editing !== '6'}
-    {loading}
-    {loaded}
-    {status}
-    {refresh}
-    {loadRanking}
-    onmodels={models}
-    onmode={mode}
-    oneffort={effort}
-    onfusion={fusion}
-  />
-  {#if needsWriter}<label
-      >Writing model for the selected stages<select bind:value={bulkWriter}
-        ><option value="">Choose one writing model…</option>{#each active.models as id}<option
-            value={id}>{name(id)}</option
-          >{/each}</select
-      ></label
-    >{/if}
-  {#if editing === 'bulk'}
-    {#if bulkIssues.length}<div class="notice review" role="status">
-        <ul>
-          {#each bulkIssues as issue}<li>{issue}</li>{/each}
-        </ul>
-      </div>{/if}
-    <div class="dialog-actions">
-      <button
-        class="secondary"
-        type="button"
-        onclick={() => {
-          editing = 'default';
-          bulk = null;
-        }}>Cancel bulk edit</button
-      ><button
-        class="primary"
-        type="button"
-        disabled={!loaded || loading || !targets.length || bulkIssues.length > 0}
-        onclick={applyBulk}>Apply to selected stages</button
-      >
-    </div>
-  {/if}
 </section>
 <ModelConfigurations
   {p}
@@ -394,6 +546,6 @@
   {refresh}
   {loadRanking}
   {commit}
-  scope={editing}
+  scope={bulk ? 'bulk' : editing || 'default'}
   {targets}
 />
