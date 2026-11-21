@@ -12,7 +12,7 @@ import {
   type Project
 } from '$lib/domain/project';
 import { exampleProject } from '$lib/domain/example';
-import { FUSION_MODEL } from '$lib/domain/model-settings';
+import { FUSION_MODEL, defaultFusion } from '$lib/domain/model-settings';
 import { projectJSON } from '$lib/export/files';
 const fusion: Model = {
   id: FUSION_MODEL,
@@ -332,5 +332,139 @@ describe('direct reasoning requests', () => {
     await launch(h.get, h.change, 'no-paid-credit', [free], 'drivers', [free.id]).done;
     expect(h.get().runs[0].status).toBe('succeeded');
     expect(h.get().runs[0].estimated).toBe(0);
+  });
+});
+
+describe('custom Fusion configuration and run snapshots', () => {
+  it('rejects a task whose estimated allowance exceeds a known context limit without dispatching', () => {
+    const h = harness();
+    const small = { ...direct, context_length: 1000 };
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    expect(
+      planRequests(h.get(), [small], 'drivers', [small.id]).validationErrors.join(' ')
+    ).toContain('too little context');
+    expect(() => launch(h.get, h.change, 'test', [small], 'drivers', [small.id])).toThrow(
+      'too little context'
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it('sends stage-specific members, analyst and effort and keeps its snapshot after settings change', async () => {
+    const p = newProject();
+    p.stage = 1;
+    p.fusionOverrides['1'] = {
+      ...defaultFusion(),
+      type: 'custom',
+      models: [direct.id],
+      analyst: direct.id,
+      effort: 'low'
+    };
+    const fetcher = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(new Response(JSON.stringify(result()))));
+    vi.stubGlobal('fetch', fetcher);
+    const h = harness(p);
+    const operation = launch(h.get, h.change, 'test', [fusion, direct], 'drivers', [FUSION_MODEL]);
+    h.change((p) => {
+      p.fusionOverrides['1'] = defaultFusion();
+    });
+    await operation.done;
+    const body = JSON.parse(fetcher.mock.calls[0][1].body);
+    expect(body.plugins).toEqual([
+      { id: 'fusion', analysis_models: [direct.id], model: direct.id, reasoning: { effort: 'low' } }
+    ]);
+    expect(h.get().runs[0].modelConfiguration?.fusion).toMatchObject({
+      type: 'custom',
+      models: [direct.id],
+      analyst: direct.id,
+      effort: 'low'
+    });
+    const restored = parseProject(JSON.parse(projectJSON(h.get())));
+    expect(restored.runs[0].modelConfiguration).toEqual(h.get().runs[0].modelConfiguration);
+    expect(restored.fusionOverrides['1'].type).toBe('preset');
+  });
+  it('retries the saved preset rather than a changed current panel and omits provider-default reasoning', async () => {
+    const p = newProject();
+    p.stage = 1;
+    p.fusionOverrides['1'] = {
+      ...defaultFusion(),
+      preset: 'general-fast',
+      effort: 'provider-default'
+    };
+    const fetcher = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(new Response(JSON.stringify(result(0.1, 'bad JSON'))))
+      );
+    vi.stubGlobal('fetch', fetcher);
+    const h = harness(p);
+    await launch(h.get, h.change, 'test', [fusion], 'drivers', [FUSION_MODEL]).done;
+    const original = h.get().runs[0];
+    expect(original.status).toBe('failed');
+    h.change((p) => {
+      p.fusionOverrides['1'] = defaultFusion();
+    });
+    fetcher.mockImplementation(() => Promise.resolve(new Response(JSON.stringify(result()))));
+    await launch(
+      h.get,
+      h.change,
+      'test',
+      [fusion],
+      'drivers',
+      [FUSION_MODEL],
+      undefined,
+      original.id
+    ).done;
+    const body = JSON.parse(fetcher.mock.calls[1][1].body);
+    expect(body.plugins).toEqual([{ id: 'fusion', preset: 'general-fast' }]);
+    expect(h.get().runs[1].retryOf).toBe(original.id);
+    expect(h.get().runs[1].modelConfiguration?.fusion.preset).toBe('general-fast');
+  });
+  it('blocks unavailable or incompatible custom roles before any dispatch or budget reservation', () => {
+    const p = newProject();
+    p.stage = 1;
+    p.fusionOverrides['1'] = {
+      ...defaultFusion(),
+      type: 'custom',
+      models: ['example/retired'],
+      effort: 'provider-default'
+    };
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    const h = harness(p);
+    expect(() => launch(h.get, h.change, 'test', [fusion], 'drivers', [FUSION_MODEL])).toThrow(
+      'example/retired'
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(h.get().runs).toHaveLength(0);
+    expect(reserved(h.get())).toBe(0);
+    h.change((p) => {
+      p.fusionOverrides['1'] = {
+        ...defaultFusion(),
+        type: 'custom',
+        models: [direct.id],
+        effort: 'max'
+      };
+    });
+    expect(() =>
+      launch(h.get, h.change, 'test', [fusion, direct], 'drivers', [FUSION_MODEL])
+    ).toThrow('max thinking effort');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it('resolves task stage effort for previews outside the analytical stage and supports provider default', () => {
+    const p = newProject();
+    p.stage = 9;
+    p.models = [direct.id];
+    p.writer = direct.id;
+    p.reasoningEfforts[direct.id] = 'high';
+    p.stageReasoningEfforts['1'] = { [direct.id]: 'low' };
+    expect(planRequests(p, [direct], 'drivers', [direct.id]).requests[0].reasoningEffort).toBe(
+      'low'
+    );
+    p.stageReasoningEfforts['1'][direct.id] = 'provider-default';
+    expect(
+      planRequests(p, [direct], 'drivers', [direct.id]).requests[0].reasoningEffort
+    ).toBeUndefined();
+    expect(p.reasoningEfforts[direct.id]).toBe('high');
   });
 });

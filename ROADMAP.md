@@ -14,6 +14,8 @@ AI remains optional and human analyst judgement remains central. New capabilitie
 
 ## Improve UX for choosing different models to use for each stage of the analysis
 
+Implemented in the [model picker specification](docs/model-picker-spec.md): visible stage overview, direct and bulk editing, scoped effort, Fusion customisation and configuration import/export. Browser interaction acceptance remains to be checked. Automatic Briefcase ingestion remains blocked on a permitted source.
+
 - Minimise the amount of clicks needed to assign different AI models (and/or Fusion router) to different stage.
 
 ## Research Mode and an approved evidence base

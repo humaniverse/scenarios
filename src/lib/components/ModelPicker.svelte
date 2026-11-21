@@ -1,134 +1,253 @@
 <script lang="ts">
-  import { Check, Plus, X, Layers, RefreshCw, Search } from '@lucide/svelte';
+  import { tick } from 'svelte';
+  import { Plus, X } from '@lucide/svelte';
   import {
-    FUSION_MODEL,
-    suggestedModels,
     displayModelName,
     effortLabels,
+    effortSchema,
+    defaultFusion,
+    fusionPresets,
     type ModelMode,
-    type ReasoningEffort
+    type EffortPreference,
+    type FusionConfiguration
   } from '$lib/domain/model-settings';
-  import { isFreeModel, effectiveEffort, supportedEfforts, type Model } from '$lib/ai/models';
+  import {
+    effectiveEffort,
+    supportedEfforts,
+    type Model,
+    type RankingLoader
+  } from '$lib/ai/models';
+  import { configurationIssues } from '$lib/ai/model-configuration';
+  import ModelBrowser, { type ModelBrowserView } from './ModelBrowser.svelte';
+
   let {
     catalogue,
     selected,
+    writer,
     mode = 'individual',
     efforts = {},
+    fusion = defaultFusion(),
     multiple = true,
     loading = false,
     loaded = false,
     status = '',
     onmodels,
+    onwriter,
     onmode,
     oneffort,
-    refresh
+    onfusion,
+    refresh,
+    loadRanking,
+    browseView = $bindable('suggested'),
+    browseSearch = $bindable('')
   }: {
     catalogue: Model[];
     selected: string[];
+    writer?: string;
     mode?: ModelMode;
-    efforts?: Record<string, ReasoningEffort>;
+    efforts?: Record<string, EffortPreference>;
+    fusion?: FusionConfiguration;
     multiple?: boolean;
     loading?: boolean;
     loaded?: boolean;
     status?: string;
     onmodels: (ids: string[]) => void;
+    onwriter?: (id: string) => void;
     onmode: (mode: ModelMode) => void;
-    oneffort: (id: string, effort: ReasoningEffort) => void;
+    oneffort: (id: string, effort: EffortPreference) => void;
+    onfusion?: (config: FusionConfiguration) => void;
     refresh: () => void;
+    loadRanking?: RankingLoader;
+    browseView?: ModelBrowserView;
+    browseSearch?: string;
   } = $props();
+
+  type Intent = { kind: 'add' | 'analyst' | 'writer' } | { kind: 'replace'; id: string };
   const uid = $props.id();
-  let view = $state<'suggested' | 'free' | 'all'>('suggested');
-  let search = $state('');
-  let advanced = $state(false);
-  let limit = $state(20);
-  const modelsById = $derived(new Map(catalogue.map((model) => [model.id, model])));
-  const selectedModel = $derived(modelsById.get(selected[0]));
-  const selectedEffort = $derived(effectiveEffort(selectedModel, efforts[selected[0]]));
-  const searchTerm = $derived(search.trim().toLowerCase());
-  const available = $derived(
-    catalogue.filter((m) => m.id !== FUSION_MODEL && !m.id.startsWith('openrouter/fusion'))
+  let intent = $state<Intent | null>(null);
+  let browser = $state<ReturnType<typeof ModelBrowser>>();
+  let heading = $state<HTMLHeadingElement>();
+  let opener: HTMLButtonElement | undefined;
+  const byId = $derived(new Map(catalogue.map((model) => [model.id, model])));
+  const name = (id: string) => displayModelName(id, byId.get(id)?.name);
+  const members = $derived(mode === 'fusion' ? fusion.models : selected);
+  const max = $derived(mode === 'fusion' ? 8 : 32);
+  const canAdd = $derived((mode === 'fusion' || multiple) && members.length < max);
+  const selectionGroup = $derived(intent?.kind === 'add' || intent?.kind === 'replace');
+  const chosenForIntent = $derived(
+    intent?.kind === 'writer'
+      ? writer
+        ? [writer]
+        : []
+      : intent?.kind === 'analyst'
+        ? fusion.analyst
+          ? [fusion.analyst]
+          : []
+        : members
   );
-  const listed = $derived(
-    (view === 'suggested'
-      ? suggestedModels.flatMap((id) => available.find((m) => m.id === id) ?? [])
-      : view === 'free'
-        ? available.filter(isFreeModel)
-        : available
-    ).filter((m) => `${m.name} ${m.id}`.toLowerCase().includes(searchTerm))
+  const actionLabel = $derived(
+    intent?.kind === 'add'
+      ? mode === 'fusion'
+        ? 'Add member'
+        : 'Add model'
+      : !selectionGroup || (mode === 'individual' && !multiple)
+        ? 'Use model'
+        : 'Replace model'
   );
+  const issues = $derived(
+    loaded
+      ? configurationIssues(
+          { mode, models: selected, writer: writer ?? selected[0] ?? '', efforts, fusion },
+          catalogue,
+          !!writer
+        )
+      : []
+  );
+
+  function updateFusion(next: Partial<FusionConfiguration>) {
+    onfusion?.({ ...fusion, models: [...fusion.models], ...next });
+  }
+
+  function updateMembers(ids: string[]) {
+    if (mode === 'fusion') updateFusion({ models: ids });
+    else onmodels(ids);
+  }
+
+  async function openBrowser(next: Intent, trigger: HTMLButtonElement) {
+    intent = next;
+    opener = trigger;
+    await tick();
+    browser?.focusSearch();
+  }
+
+  const replaceButtonId = (id: string) => `${uid}-replace-${id}`;
+
+  async function closeBrowser(focusId?: string) {
+    intent = null;
+    await tick();
+    const newButton = focusId ? document.getElementById(replaceButtonId(focusId)) : null;
+    (newButton ?? (opener?.isConnected ? opener : heading))?.focus();
+  }
+
   function choose(id: string) {
-    if (selected.includes(id)) {
-      if (selected.length > 1) onmodels(selected.filter((model) => model !== id));
-      return;
+    const replacing = intent?.kind === 'replace';
+    if (intent?.kind === 'writer') onwriter?.(id);
+    else if (intent?.kind === 'analyst') updateFusion({ analyst: id });
+    else if (intent?.kind === 'add') updateMembers([...members, id]);
+    else if (intent?.kind === 'replace') {
+      const target = intent.id;
+      updateMembers(members.map((member) => (member === target ? id : member)));
     }
-    onmodels(multiple ? [...selected, id] : [id]);
+    void closeBrowser(replacing ? id : undefined);
   }
-  const name = (id: string) => displayModelName(id, modelsById.get(id)?.name) || id;
-  const developers: Record<string, string> = {
-    anthropic: 'Anthropic',
-    openai: 'OpenAI',
-    google: 'Google',
-    mistralai: 'Mistral',
-    moonshotai: 'MoonshotAI',
-    meta: 'Meta',
-    openrouter: 'OpenRouter',
-    nvidia: 'NVIDIA'
-  };
-  function developer(id: string) {
-    const prefix = id.replace(/^~/, '').split('/')[0];
-    return developers[prefix] ?? prefix;
+
+  function onlyModel(id: string) {
+    updateMembers([id]);
+    void closeBrowser(id);
   }
-  const price = (m: Model) => {
-    const input = Number(m.pricing.prompt),
-      output = Number(m.pricing.completion);
-    return [input, output].every((n) => Number.isFinite(n) && n >= 0)
-      ? `$${(input * 1e6).toFixed(2)} input / $${(output * 1e6).toFixed(2)} output per million tokens${Number(m.pricing.request ?? 0) > 0 ? `, plus $${m.pricing.request} per request` : ''}`
-      : 'Variable pricing';
-  };
+
+  async function remove(id: string) {
+    updateMembers(members.filter((member) => member !== id));
+    intent = null;
+    await tick();
+    heading?.focus();
+  }
+
+  function changeMode(next: ModelMode) {
+    intent = null;
+    onmode(next);
+  }
 </script>
 
 <div class="model-picker">
-  <section class="model-start" aria-label="AI configuration summary">
-    <strong
-      >{mode === 'fusion'
-        ? 'Combined panel response'
-        : selected.length === 1
-          ? 'One model for this analysis'
-          : `${selected.length} independent perspectives`}</strong
-    >
-    <p>{mode === 'fusion' ? 'OpenRouter Fusion' : selected.map(name).join(', ')}</p>
-    <p class="small muted">
+  {#if mode === 'individual' || fusion.type === 'custom'}
+    <h4 class="picker-selection-heading" tabindex="-1" bind:this={heading}>
       {mode === 'fusion'
-        ? 'One combined contribution, charged to your overall exercise budget.'
-        : selected.length === 1
-          ? 'Recommended for getting started: one response to review, one set of charges. You can add perspectives after seeing a result.'
-          : 'Review the contribution and cost of each perspective before running.'}
+        ? `Panel members (${members.length} of 8)`
+        : multiple
+          ? 'Selected models'
+          : 'Selected model'}
+    </h4>
+    <ul class="picker-current-list">
+      {#each members as id, i (id)}
+        <li>
+          <span class="model-mark" aria-hidden="true">{['●', '■', '▲', '◆'][i % 4]}</span>
+          <div class="picker-current-model">
+            <strong>{name(id)}</strong>
+            {#if loaded && !byId.has(id)}<small class="picker-unavailable">Unavailable · {id}</small
+              >{/if}
+          </div>
+          <div class="picker-current-actions">
+            <button
+              id={replaceButtonId(id)}
+              type="button"
+              class="secondary small"
+              aria-label={`Replace ${name(id)}`}
+              onclick={(event) => openBrowser({ kind: 'replace', id }, event.currentTarget)}
+              >Replace</button
+            >
+            {#if members.length > 1}
+              <button
+                type="button"
+                class="icon-button"
+                aria-label={`Remove ${name(id)}`}
+                onclick={() => remove(id)}><X size={16} aria-hidden="true" /></button
+              >
+            {/if}
+          </div>
+        </li>
+      {/each}
+    </ul>
+    {#if canAdd || !members.length}
+      <button
+        type="button"
+        class="text-button picker-add-model"
+        onclick={(event) => openBrowser({ kind: 'add' }, event.currentTarget)}
+      >
+        <Plus size={16} aria-hidden="true" />
+        {mode === 'fusion'
+          ? 'Add panel member'
+          : members.length
+            ? 'Add another model'
+            : 'Add model'}
+      </button>
+    {/if}
+  {:else}
+    <h4 class="picker-selection-heading" tabindex="-1" bind:this={heading}>Fusion panel</h4>
+    <p>{fusionPresets.find((preset) => preset.id === fusion.preset)?.name}</p>
+  {/if}
+  {#if mode === 'fusion'}
+    <p class="small muted">
+      Fusion combines its panel into one contribution and may use web research.
     </p>
-    {#if mode === 'individual' && selected.length === 1}<p class="small muted">
-        Thinking effort: {selectedModel
-          ? selectedEffort
-            ? effortLabels[selectedEffort]
-            : 'Not offered by this model'
-          : 'Checked when the model list loads'}.
-      </p>{/if}
-  </section>
-  <details class="model-advanced model-settings-disclosure" bind:open={advanced}>
-    <summary>Change models and thinking effort, or combine models with 'Fusion' (advanced)</summary>
+  {/if}
+
+  {#if issues.length}
+    <div class="notice review" role="status">
+      <strong>Review this selection</strong>
+      <ul>
+        {#each issues as issue}<li>{issue}</li>{/each}
+      </ul>
+    </div>
+  {/if}
+
+  <details class="picker-settings">
+    <summary>Model settings</summary>
     <fieldset class="model-mode-options">
-      <legend>How would you like AI to help?</legend>
+      <legend>Contribution mode</legend>
       <label class:chosen={mode === 'individual'}>
         <input
           type="radio"
           name={`${uid}-mode`}
           checked={mode === 'individual'}
-          onchange={() => onmode('individual')}
+          onchange={() => changeMode('individual')}
         />
         <span
-          ><strong>Choose individual models</strong><small
-            >{multiple
-              ? 'Get separate perspectives from the models you choose.'
-              : 'Choose one model for this proposal.'}</small
-          ></span
+          ><strong>Independent models</strong><small>
+            {multiple
+              ? 'Each selected model contributes separately.'
+              : 'One model contributes at a time.'}
+          </small></span
         >
       </label>
       <label class:chosen={mode === 'fusion'}>
@@ -136,187 +255,180 @@
           type="radio"
           name={`${uid}-mode`}
           checked={mode === 'fusion'}
-          onchange={() => onmode('fusion')}
+          onchange={() => changeMode('fusion')}
         />
         <span
-          ><strong>Let Fusion combine models</strong><small
-            >A panel considers your question and returns one combined response.</small
+          ><strong>Fusion</strong><small
+            >A panel and analyst produce one combined contribution.</small
           ></span
         >
       </label>
     </fieldset>
     {#if mode === 'fusion'}
-      <div class="fusion-explanation">
-        <Layers size={24} aria-hidden="true" />
-        <div>
-          <h3>Several perspectives. One response.</h3>
+      <section class="fusion-controls" aria-label="Fusion panel configuration">
+        <label
+          >Panel configuration
+          <select
+            value={fusion.type}
+            onchange={(event) => {
+              intent = null;
+              updateFusion({ type: event.currentTarget.value as FusionConfiguration['type'] });
+            }}
+          >
+            <option value="preset">OpenRouter preset</option>
+            <option value="custom">Custom panel</option>
+          </select>
+        </label>
+        {#if fusion.type === 'preset'}
+          <label
+            >Preset
+            <select
+              value={fusion.preset}
+              onchange={(event) =>
+                updateFusion({
+                  preset: event.currentTarget.value as FusionConfiguration['preset']
+                })}
+            >
+              {#each fusionPresets as preset}<option value={preset.id}>{preset.name}</option>{/each}
+            </select>
+          </label>
+          <p class="small muted">OpenRouter manages preset membership and may update it.</p>
+        {/if}
+        <label
+          >Shared Fusion thinking effort
+          <select
+            value={fusion.effort}
+            onchange={(event) =>
+              updateFusion({ effort: event.currentTarget.value as FusionConfiguration['effort'] })}
+          >
+            <option value="provider-default">Provider default</option>
+            {#each effortSchema.options as effort}<option value={effort}
+                >{effortLabels[effort]}</option
+              >{/each}
+          </select>
+        </label>
+        <div class="picker-analyst">
           <p>
-            OpenRouter Fusion consults a panel of models, compares their answers and brings them
-            together. It may research the web and takes longer than a single model.
+            <strong>Analyst model</strong> · {fusion.analyst
+              ? name(fusion.analyst)
+              : 'Provider-selected'}
           </p>
-          <p class="small muted">
-            Its panel uses High thinking effort. Costs vary and count towards the same overall
-            exercise budget as every other model.
-          </p>
-          {#if loaded && !catalogue.some((m) => m.id === FUSION_MODEL)}<p class="notice review">
-              Fusion isn’t available for this connection. Refresh the list or choose individual
-              models.
-            </p>{/if}
+          <p class="small muted">The analyst compares panel responses before the final answer.</p>
+          <button
+            type="button"
+            class="secondary small"
+            onclick={(event) => openBrowser({ kind: 'analyst' }, event.currentTarget)}
+            >Choose analyst model</button
+          >
+          {#if fusion.analyst}
+            <button
+              type="button"
+              class="text-button small"
+              onclick={() => {
+                intent = null;
+                updateFusion({ analyst: undefined });
+              }}>Use provider-selected analyst</button
+            >
+          {/if}
+        </div>
+        {#if fusion.type === 'custom' || fusion.analyst}
+          <details class="picker-details">
+            <summary>Fusion model IDs</summary>
+            <div>
+              {#if fusion.type === 'custom'}
+                {#each fusion.models as id}<code>{id}</code>{/each}
+              {/if}
+              {#if fusion.analyst}<span>Analyst <code>{fusion.analyst}</code></span>{/if}
+            </div>
+          </details>
+        {/if}
+        <p class="small">
           <a
-            class="small"
             href="https://openrouter.ai/docs/guides/routing/routers/fusion-router"
             target="_blank"
             rel="noreferrer">How Fusion works</a
           >
-        </div>
-      </div>
+        </p>
+      </section>
     {:else}
-      <div class="section-line picker-selection-heading">
-        <h3>{multiple ? 'Your models' : 'Your model'}</h3>
-        <span class="small muted">{selected.length} selected</span>
-      </div>
-      <p class="small muted">
-        {multiple
-          ? 'One is enough to start. Add more for different perspectives; each model runs separately.'
-          : 'You can change this choice before running. Your writing stays yours to review.'}
-      </p>
-      <div class="picker-selected">
-        {#each selected as id, i (id)}
-          {@const model = modelsById.get(id)}
-          {@const choices = supportedEfforts(model)}
-          <div class="picker-selected-model">
-            <div class="picker-model-heading">
-              <span class="model-mark" aria-hidden="true">{['●', '■', '▲', '◆'][i % 4]}</span>
-              <div>
-                <strong>{name(id)}</strong><small
-                  >{developer(id)}{model && isFreeModel(model) ? ' · Free' : ''}</small
+      {#each selected as id (id)}
+        {@const model = byId.get(id)}
+        {@const choices = supportedEfforts(model)}
+        {@const preference = efforts[id] ?? effectiveEffort(model) ?? 'provider-default'}
+        <div class="picker-effort-model">
+          <label class="picker-effort"
+            >Thinking effort for {name(id)}
+            <select
+              value={preference}
+              onchange={(event) => oneffort(id, event.currentTarget.value as EffortPreference)}
+            >
+              <option value="provider-default">Provider default</option>
+              {#if preference !== 'provider-default' && !choices.includes(preference)}
+                <option value={preference} disabled>{effortLabels[preference]} · unsupported</option
                 >
-              </div>
-              {#if multiple}<button
-                  class="icon-button"
-                  disabled={selected.length === 1}
-                  aria-label={`Remove ${name(id)}`}
-                  onclick={() => onmodels(selected.filter((v) => v !== id))}><X size={16} /></button
-                >{/if}
-            </div>
-            {#if loaded && !model}<p class="small picker-unavailable">
-                Not available for this connection. Choose a replacement below.
-              </p>{/if}
-            {#if choices.length}<label class="picker-effort"
-                >Thinking effort<select
-                  aria-label={`Thinking effort for ${name(id)}`}
-                  value={effectiveEffort(model, efforts[id])}
-                  onchange={(e) => oneffort(id, e.currentTarget.value as ReasoningEffort)}
-                  >{#each choices as effort}<option value={effort}>{effortLabels[effort]}</option
-                    >{/each}</select
-                ></label
-              >{/if}
-            <details class="picker-details">
-              <summary>Model details</summary>
-              <div>
-                <code>{id}</code>{#if model}<span>{price(model)}</span
-                  >{#if model.context_length}<span
-                      >{model.context_length.toLocaleString()} token context</span
-                    >{/if}{:else}<span
-                    >Refresh the model list to check availability and prices.</span
-                  >{/if}
-              </div>
-            </details>
-          </div>
-        {/each}
-      </div>
-      {#if selected.some((id) => supportedEfforts(modelsById.get(id)).length)}<p
-          class="small muted picker-thinking-help"
-        >
-          More thinking can take longer and cost more. The recommended starter uses Medium where
-          supported.
-        </p>{/if}
-      <div class="picker-browser">
-        <div class="picker-filter-tabs" role="group" aria-label="Find models">
-          {#each [['suggested', 'Suggested'], ['free', 'Free'], ['all', 'Browse all']] as [value, label]}<button
-              class:active={view === value}
-              aria-pressed={view === value}
-              onclick={() => {
-                view = value as typeof view;
-                limit = 20;
-              }}>{label}</button
-            >{/each}
+              {/if}
+              {#each choices as effort}<option value={effort}>{effortLabels[effort]}</option>{/each}
+            </select>
+          </label>
+          <small class="muted">{id}{id.startsWith('~') ? ' · tracks provider updates' : ''}</small>
         </div>
-        {#if view === 'free'}<p class="small muted">
-            These models have no input, output or request charge in the current catalogue.
-            OpenRouter may apply usage limits. A key is still required.
-          </p>{/if}
-        <label class="picker-search"
-          ><span>Find a model</span>
-          <div>
-            <Search size={17} aria-hidden="true" /><input
-              type="search"
-              bind:value={search}
-              oninput={() => (limit = 20)}
-              placeholder="Search name or developer…"
-            />
-          </div></label
-        >
-        <div class="section-line picker-catalogue-status">
-          <span class="small muted" role="status"
-            >{loading
-              ? 'Finding available models…'
-              : `${listed.length} ${listed.length === 1 ? 'model' : 'models'}${search ? ' found' : ''}`}</span
-          ><button class="text-button small" disabled={loading} onclick={refresh}
-            ><RefreshCw size={14} /> Refresh</button
-          >
-        </div>
-        {#if !loading && status}<p class="small muted" role="status">{status}</p>{/if}
-        {#if !loading && !listed.length}<div class="picker-empty">
-            <strong>{loaded ? 'No models found here' : 'Let’s find your models'}</strong>
-            <p>
-              {search
-                ? 'Try another name or developer, or choose Browse all.'
-                : loaded
-                  ? 'Try Browse all, or refresh the list to check again.'
-                  : 'Refresh the list to see suggestions and free options.'}
-            </p>
-          </div>{/if}
-        <div class="picker-results" aria-busy={loading}>
-          {#each listed.slice(0, limit) as model (model.id)}
-            {@const added = selected.includes(model.id)}
-            <div class="picker-result">
-              <div>
-                <strong>{name(model.id)}</strong><small
-                  >{model.id === 'openrouter/free'
-                    ? 'Chooses a free model for you'
-                    : developer(model.id)}</small
-                >
-              </div>
-              <span class="picker-price">{isFreeModel(model) ? 'Free' : 'Paid'}</span><button
-                class="secondary small"
-                class:is-added={added}
-                disabled={added && selected.length === 1}
-                aria-pressed={added}
-                aria-label={`${added ? 'Selected' : multiple ? 'Add' : 'Use'} ${name(model.id)}`}
-                onclick={() => choose(model.id)}
-                >{#if added}<Check size={15} /> Selected{:else}<Plus size={15} />
-                  {multiple ? 'Add' : 'Use'}{/if}</button
-              >
-            </div>
-          {/each}
-        </div>
-        {#if listed.length > limit}<button
-            class="secondary picker-show-more"
-            onclick={() => (limit += 20)}
-            >Show more models ({listed.length - limit} remaining)</button
-          >{/if}
-      </div>
+      {/each}
     {/if}
   </details>
-</div>
 
-<style>
-  .model-start {
-    padding: 16px 0;
-  }
-  .model-start > p {
-    margin: 8px 0 0;
-    max-width: 70ch;
-  }
-</style>
+  {#if writer && onwriter}
+    <section class="stage-writing-model" aria-label="Default writing model">
+      <div class="section-line">
+        <div>
+          <h4>Default writing model</h4>
+          <p>{name(writer)}</p>
+        </div>
+        <button
+          type="button"
+          class="secondary small"
+          aria-expanded={intent?.kind === 'writer'}
+          onclick={(event) => openBrowser({ kind: 'writer' }, event.currentTarget)}
+        >
+          Change writing model
+        </button>
+      </div>
+    </section>
+  {/if}
+
+  {#if intent}
+    <section class="picker-chooser" aria-labelledby={`${uid}-chooser-title`}>
+      <div class="section-line">
+        <h4 id={`${uid}-chooser-title`}>
+          {intent.kind === 'writer'
+            ? 'Choose the default writing model'
+            : intent.kind === 'replace'
+              ? `Replace ${name(intent.id)}`
+              : intent.kind === 'analyst'
+                ? 'Choose an analyst model'
+                : mode === 'fusion'
+                  ? 'Add a panel member'
+                  : 'Add a model'}
+        </h4>
+        <button type="button" class="text-button small" onclick={() => closeBrowser()}
+          >Close model search</button
+        >
+      </div>
+      <ModelBrowser
+        bind:this={browser}
+        bind:view={browseView}
+        bind:search={browseSearch}
+        {catalogue}
+        selected={chosenForIntent}
+        {actionLabel}
+        onselect={choose}
+        ononly={selectionGroup && (mode === 'fusion' || multiple) ? onlyModel : undefined}
+        individualOnly={mode === 'fusion' && intent.kind !== 'writer'}
+        {loading}
+        {loaded}
+        {status}
+        {refresh}
+        {loadRanking}
+      />
+    </section>
+  {/if}
+</div>

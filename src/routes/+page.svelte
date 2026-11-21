@@ -63,6 +63,7 @@
     getModels,
     testKey,
     planRequests,
+    taskModelStage,
     responseText,
     isRunnableTask,
     type Model,
@@ -90,10 +91,18 @@
   import {
     FUSION_MODEL,
     requestModels,
-    selectionMode,
+    aiModelStages,
+    resolveModelConfiguration,
+    defaultFusion,
+    copyFusion,
+    displayModelName,
+    hasStageModels,
     type ModelMode,
-    type ReasoningEffort
+    type EffortPreference,
+    type FusionConfiguration
   } from '$lib/domain/model-settings';
+  import type { ModelSort, ModelRanking } from '$lib/ai/models';
+  import { configurationSummary } from '$lib/ai/model-configuration';
   import { prerequisiteStage } from '$lib/domain/workflow';
   import PageWalkthrough from '$lib/components/PageWalkthrough.svelte';
   import ExampleJourney from '$lib/components/ExampleJourney.svelte';
@@ -125,7 +134,9 @@
   let catalogueLoaded = $state(false);
   let catalogueGeneration = 0;
   let paidMode = $state<ModelMode>('individual');
-  let paidEfforts = $state<Record<string, ReasoningEffort>>({});
+  let paidEfforts = $state<Record<string, EffortPreference>>({});
+  let paidFusion = $state<FusionConfiguration>(defaultFusion());
+  const rankingRequests = new Map<ModelSort, Promise<ModelRanking>>();
   let paidTask = $state<Task>('drivers');
   let paidTargets = $state<string[] | undefined>();
   let paidContributors = $state<{ modelId: string; included: boolean }[]>([]);
@@ -134,6 +145,10 @@
   let paidNarrativeOptions = $state<NarrativeOptions | undefined>();
   let paidError = $state('');
   let paidConnectionOpen = $state(false);
+  let paidPickerOpen = $state(false);
+  let paidSelectionSource = $state('');
+  let paidPickerButton = $state<HTMLButtonElement>();
+  let paidPickerHeading = $state<HTMLHeadingElement>();
   let busy = $state(false);
   let leaving = $state(false);
   let operation: Operation | null = null;
@@ -171,11 +186,26 @@
           retryId,
           paidNarrativeOptions,
           paidChainOptions,
-          { reasoningEfforts: paidEfforts }
+          { reasoningEfforts: paidEfforts, fusion: paidFusion }
         )
       : null
   );
   const paidEstimate = $derived(paidPlan?.estimatedTotal ?? null);
+  const paidModelNames = $derived(
+    new Map(catalogue.map((model) => [model.id, displayModelName(model.id, model.name)]))
+  );
+  const paidSelectionSummary = $derived(
+    configurationSummary(
+      {
+        mode: paidMode,
+        models: paidModels,
+        writer: paidModels[0] ?? '',
+        efforts: paidEfforts,
+        fusion: paidFusion
+      },
+      (id) => paidModelNames.get(id) ?? displayModelName(id)
+    )
+  );
   const scoringDriverCount = $derived(
     paidTargets?.length ??
       p?.drivers.filter((d) => !d.archived && d.approved && d.origin !== 'wildcard').length ??
@@ -351,6 +381,7 @@
   async function loadCatalogue() {
     const sessionKey = key.trim();
     const generation = ++catalogueGeneration;
+    rankingRequests.clear();
     catalogueLoading = true;
     catalogueStatus = 'Finding available models…';
     try {
@@ -370,7 +401,38 @@
       if (generation === catalogueGeneration) catalogueLoading = false;
     }
   }
+  async function loadRanking(sort: ModelSort): Promise<ModelRanking> {
+    const sessionKey = key.trim();
+    const generation = catalogueGeneration;
+    if (!catalogueLoaded || catalogueForKey !== sessionKey)
+      throw new Error('Refresh the catalogue before loading rankings.');
+    let request = rankingRequests.get(sort);
+    if (!request) {
+      request = getModels(sessionKey, sort, sort === 'intelligence-high-to-low').then((models) => {
+        if (sessionKey !== key.trim() || generation !== catalogueGeneration)
+          throw new Error('Connection changed.');
+        const seen = new Set<string>();
+        const ids = models
+          .filter((model) => {
+            const identity = model.canonical_slug ?? model.id;
+            if (seen.has(identity)) return false;
+            seen.add(identity);
+            return true;
+          })
+          .map((model) => model.id);
+        return { ids, sort, refreshedAt: new Date().toISOString() };
+      });
+      rankingRequests.set(sort, request);
+    }
+    try {
+      return await request;
+    } catch (error) {
+      if (rankingRequests.get(sort) === request) rankingRequests.delete(sort);
+      throw error;
+    }
+  }
   function keyChanged() {
+    rankingRequests.clear();
     keyStatus = '';
     keyCheckFailed = false;
     verifiedKey = null;
@@ -413,9 +475,14 @@
     void loadCatalogue();
   }
   function settings() {
-    settingsTab = 'connection';
+    settingsTab = (p && aiModelStages.includes(p.stage)) || connected ? 'models' : 'connection';
     dialog = 'settings';
     if (catalogueForKey !== key.trim() && !catalogueLoading) void loadCatalogue();
+  }
+  async function togglePaidPicker() {
+    paidPickerOpen = !paidPickerOpen;
+    await tick();
+    (paidPickerOpen ? paidPickerHeading : paidPickerButton)?.focus();
   }
   function request(
     task: Task,
@@ -433,14 +500,16 @@
       chainOptions ?? {
         mode: savedGeneration?.chainBatch?.kind === 'wildcard' ? 'disruption' : 'standard'
       };
-    paidMode = retry
-      ? retry.modelId === FUSION_MODEL
-        ? 'fusion'
-        : 'individual'
-      : selectionMode(p, String(p.stage));
+    const modelStage = taskModelStage(task, p.stage);
+    const config =
+      retry?.modelConfiguration ?? resolveModelConfiguration(p, String(retry?.stage ?? modelStage));
+    paidFusion = copyFusion(
+      retry?.modelId === FUSION_MODEL && !retry.modelConfiguration ? defaultFusion() : config.fusion
+    );
+    paidMode = retry ? (retry.modelId === FUSION_MODEL ? 'fusion' : 'individual') : config.mode;
     paidEfforts = {
-      ...p.reasoningEfforts,
-      ...(retry?.reasoningEffort ? { [retry.modelId]: retry.reasoningEffort } : {})
+      ...config.efforts,
+      ...(retry ? { [retry.modelId]: retry.reasoningEffort ?? ('provider-default' as const) } : {})
     };
     paidTargets = targets;
     retryId = retry?.id;
@@ -451,7 +520,11 @@
       ? [retry.modelId]
       : writer && paidMode === 'individual'
         ? [writer]
-        : requestModels(p, p.stage, ['narrative', 'narrative_edit', 'consolidate'].includes(task));
+        : requestModels(
+            p,
+            modelStage,
+            ['narrative', 'narrative_edit', 'consolidate'].includes(task)
+          );
     paidContributors = (models.includes(FUSION_MODEL) ? p.models.slice(0, 1) : models).map(
       (modelId, i) => ({
         modelId,
@@ -460,6 +533,14 @@
     );
     paidError = '';
     paidConnectionOpen = !key.trim();
+    paidPickerOpen = false;
+    paidSelectionSource = retry
+      ? 'Starts from the original contribution.'
+      : writer && paidMode === 'individual'
+        ? 'Starts from the model chosen for this task.'
+        : hasStageModels(p, String(modelStage))
+          ? `Starts from saved settings for ${stages[modelStage]}.`
+          : `Starts from exercise defaults for ${stages[modelStage]}.`;
     dialog = 'paid';
     if (catalogueForKey !== key.trim() && !catalogueLoading) void loadCatalogue();
   }
@@ -482,15 +563,13 @@
         retryId,
         paidNarrativeOptions,
         paidChainOptions,
-        { reasoningEfforts: paidEfforts }
+        { reasoningEfforts: paidEfforts, fusion: paidFusion }
       );
       started = true;
       if (project?.modelSetupStatus === 'skipped')
         change((p) => {
           p.modelSetupStatus = 'configured';
         });
-      if (singleContributor && paidMode === 'individual' && !p?.overrides[String(p?.stage)])
-        change((p) => (p.writer = paidModels[0]));
       dialog = '';
       undoStack = [];
       redoStack = [];
@@ -812,6 +891,7 @@
                   loaded={catalogueLoaded && catalogueForKey === key.trim()}
                   status={catalogueStatus}
                   refresh={loadCatalogue}
+                  {loadRanking}
                 >
                   {#snippet connection()}{@render openRouterConnection()}{/snippet}
                 </ModelSetup>
@@ -899,6 +979,9 @@
                           ? 'budget reservation'
                           : 'estimate'} ${r.estimated.toFixed(5)}
                       </p>
+                      {#if r.modelConfiguration}<p class="small">
+                          Saved selection: {configurationSummary(r.modelConfiguration)}
+                        </p>{/if}
                       {#if r.reasoningEffort || r.resolvedModelId || r.fusionInvoked !== undefined}<p
                           class="small"
                         >
@@ -1079,7 +1162,11 @@
         {change}
         {catalogue}
         loading={catalogueLoading}
-        loaded={catalogueLoaded}
+        loaded={catalogueLoaded && catalogueForKey === key.trim()}
+        initialScope={aiModelStages.includes(canonicalStage(p.stage))
+          ? String(canonicalStage(p.stage))
+          : 'default'}
+        {loadRanking}
         status={catalogueStatus}
         refresh={loadCatalogue}
       />
@@ -1117,7 +1204,89 @@
               : `Generate ${paidTask === 'ratings' ? (paidMode === 'fusion' ? 'combined scores' : 'independent scores') : paidTask}`}
     wide
     close={() => (dialog = '')}
-    ><section class="request-disclosure" aria-label="Information and research settings">
+  >
+    <section class="run-model-preview" aria-labelledby="run-model-preview-title">
+      <div class="run-model-overview">
+        <div>
+          <h3 id="run-model-preview-title">Models for this run</h3>
+          <p class="run-model-selection">{paidSelectionSummary || 'Choose a model'}</p>
+          <p class="small muted">{paidSelectionSource}</p>
+          <button
+            type="button"
+            class="secondary small"
+            bind:this={paidPickerButton}
+            aria-expanded={paidPickerOpen}
+            aria-controls={paidPickerOpen ? 'run-model-editor' : undefined}
+            onclick={togglePaidPicker}
+            >{paidPickerOpen ? 'Close model editor' : 'Change for this run'}</button
+          >
+        </div>
+        <div class="run-model-estimate" aria-live="polite">
+          <span class="small muted"
+            >{paidMode === 'fusion' ? 'Remaining exercise budget' : 'Estimated allowance'}</span
+          >
+          <strong>
+            {paidMode === 'fusion'
+              ? p.budget === null
+                ? 'Set an exercise budget'
+                : `$${(remainingBudget(p) ?? 0).toFixed(4)} USD`
+              : paidEstimate === null
+                ? 'Price unavailable'
+                : `$${paidEstimate.toFixed(4)} USD`}
+          </strong>
+          <span class="small muted">
+            {paidPlan?.requests.length ?? 0}
+            {paidPlan?.requests.length === 1 ? 'request' : 'requests'}
+            {#if paidTask === 'chains'}
+              · {paidCandidateCount} {paidCandidateCount === 1 ? 'candidate' : 'candidates'}
+            {:else if paidTask === 'ratings'}
+              · {scoringDriverCount} {scoringDriverCount === 1 ? 'driver' : 'drivers'}
+            {/if}
+          </span>
+        </div>
+      </div>
+      <details class="picker-details">
+        <summary>How the allowance is calculated</summary>
+        <p>
+          {#if paidMode === 'fusion'}
+            Fusion uses the exercise budget. The app reserves the remaining budget while this run is
+            in progress and reconciles the reservation with reported charges. OpenRouter controls
+            any external spending cap.
+          {:else}
+            The allowance uses current prices and up to {Math.max(
+              0,
+              ...(paidPlan?.requests.map((request) => request.maxOutputTokens) ?? [])
+            ).toLocaleString()} output tokens per request, including thinking. Actual charges can vary.
+          {/if}
+        </p>
+      </details>
+      {#if paidPickerOpen}
+        <div id="run-model-editor" class="run-model-editor">
+          <h4 tabindex="-1" bind:this={paidPickerHeading}>Changes for this run only</h4>
+          <ModelPicker
+            {catalogue}
+            selected={paidContributors
+              .filter((contributor) => contributor.included)
+              .map((contributor) => contributor.modelId)}
+            mode={paidMode}
+            fusion={paidFusion}
+            efforts={paidEfforts}
+            multiple={!singleContributor}
+            loading={catalogueLoading}
+            loaded={catalogueLoaded && catalogueForKey === key.trim()}
+            {loadRanking}
+            status={catalogueStatus}
+            refresh={loadCatalogue}
+            onmodels={(ids) =>
+              (paidContributors = ids.map((modelId) => ({ modelId, included: true })))}
+            onmode={(mode) => (paidMode = mode)}
+            oneffort={(id, effort) => (paidEfforts = { ...paidEfforts, [id]: effort })}
+            onfusion={(config) => (paidFusion = copyFusion(config))}
+          />
+        </div>
+      {/if}
+    </section>
+    <section class="request-disclosure" aria-label="Information and research settings">
       <strong>What information will be sent</strong>
       <p class="small">
         Your analytical question and horizon, plus the drivers, hypotheses and scenario text needed
@@ -1139,11 +1308,6 @@
           )}</pre>
       </details>
     </section>
-    <p>
-      {paidMode === 'fusion'
-        ? 'Review this task and your remaining exercise budget before running.'
-        : 'Review this task and its estimated cost before running.'}
-    </p>
     {#if paidTask === 'narrative_edit'}<p class="small">
         <strong>Editing request:</strong>
         {paidNarrativeOptions?.instructions?.trim() ||
@@ -1181,77 +1345,16 @@
       <summary>{key.trim() ? 'OpenRouter connection · Change key' : 'Connect OpenRouter'}</summary>
       {@render openRouterConnection()}
     </details>
-    <ModelPicker
-      {catalogue}
-      selected={paidContributors.filter((c) => c.included).map((c) => c.modelId)}
-      mode={paidMode}
-      efforts={paidEfforts}
-      multiple={!singleContributor}
-      loading={catalogueLoading}
-      loaded={catalogueLoaded}
-      status={catalogueStatus}
-      refresh={loadCatalogue}
-      onmodels={(ids) => (paidContributors = ids.map((modelId) => ({ modelId, included: true })))}
-      onmode={(mode) => (paidMode = mode)}
-      oneffort={(id, effort) => (paidEfforts = { ...paidEfforts, [id]: effort })}
-    />
-    {#if paidTask === 'chains'}
-      <p class="chain-generation-summary" role="status">
-        <strong
-          >{paidCandidateCount} new candidate {paidCandidateCount === 1
-            ? 'combination'
-            : 'combinations'}</strong
-        >
-        from {paidModels.length}
-        {paidMode === 'fusion'
-          ? 'combined contributor'
-          : paidModels.length === 1
-            ? 'model'
-            : 'models'}. Choose any one or more combinations to take into writing.
-      </p>
-    {/if}
-    <div class="estimate-box">
-      <span
-        >{#if paidMode === 'fusion'}Remaining exercise budget{:else}Estimated allowance for {paidTask ===
-          'ratings'
-            ? `scoring ${scoringDriverCount} ${scoringDriverCount === 1 ? 'driver' : 'drivers'}`
-            : paidTask === 'drivers'
-              ? 'generating a driver list'
-              : paidTask === 'chains'
-                ? `creating ${paidCandidateCount} combinations`
-                : paidTask === 'hypotheses'
-                  ? 'developing alternative outcomes'
-                  : paidTask === 'consolidate'
-                    ? 'reviewing overlap'
-                    : 'one writing proposal'}{/if}</span
-      ><strong
-        >{paidEstimate === null
-          ? paidMode === 'fusion'
-            ? p.budget === null
-              ? 'Set an exercise budget'
-              : `$${(remainingBudget(p) ?? 0).toFixed(4)} USD`
-            : 'Price unavailable'
-          : `$${paidEstimate.toFixed(4)} USD`}</strong
-      ><small
-        >{paidPlan?.requests.length ?? 0}
-        {paidPlan?.requests.length === 1 ? 'request' : 'requests'} across {paidModels.length}
-        {paidMode === 'fusion'
-          ? 'combined contributor'
-          : paidModels.length === 1
-            ? 'model'
-            : 'models'}. {#if paidMode === 'fusion'}Fusion uses the same budget as the rest of this
-          exercise. Costs vary; the remaining budget is reserved while this run is in progress, then
-          updated with reported charges. This is not an external spending cap.{:else}Based on
-          current prices and up to {Math.max(
-            0,
-            ...(paidPlan?.requests.map((r) => r.maxOutputTokens) ?? [])
-          ).toLocaleString()} output tokens per request, including thinking. Actual charges can vary.{/if}</small
-      >
-    </div>
+    {#if paidPlan?.validationErrors.length}<div class="notice review" role="status">
+        <ul>
+          {#each paidPlan.validationErrors as issue}<li>{issue}</li>{/each}
+        </ul>
+      </div>{/if}
     {#if paidTask === 'chains'}<p class="small muted">
         {#if retryId}The saved request scope is retained for this retry.{:else}Generate combinations
           requests three candidates per model; Explore a disruption requests one per model.{/if} Every
         combination includes all selected uncertainties. Retry / replace repeats only the failed batch.
+        Choose any one or more combinations to take into writing.
       </p>{/if}
     {#if paidMode === 'fusion' && (remainingBudget(p) ?? 0) <= 0}<p
         class="notice review"
@@ -1305,6 +1408,7 @@
           paidEstimate === null ||
           (paidEstimate !== null && !canSpend(p, paidEstimate)) ||
           !paidPlan?.requests.length ||
+          !!paidPlan?.validationErrors.length ||
           new Set(paidModels).size !== paidModels.length ||
           offline}
         onclick={run}

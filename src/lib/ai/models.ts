@@ -4,6 +4,7 @@ import { FUSION_MODEL, effortSchema, type ReasoningEffort } from '$lib/domain/mo
 const modelSchema = z.object({
   id: z.string(),
   name: z.string(),
+  canonical_slug: z.string().nullable().optional(),
   context_length: z.number().nullable().optional(),
   pricing: z.object({ prompt: z.string(), completion: z.string(), request: z.string().optional() }),
   supported_parameters: z.array(z.string()).nullable().optional(),
@@ -75,16 +76,29 @@ export function outputAllowance(base: number, m?: Model, effort?: ReasoningEffor
     64000
   );
 }
-export async function getModels(key = ''): Promise<Model[]> {
+export type ModelSort =
+  'intelligence-high-to-low' | 'throughput-high-to-low' | 'latency-low-to-high';
+export interface ModelRanking {
+  ids: string[];
+  refreshedAt: string;
+  sort: ModelSort;
+}
+export type RankingLoader = (sort: ModelSort) => Promise<ModelRanking>;
+export async function getModels(
+  key = '',
+  sort: ModelSort = 'intelligence-high-to-low',
+  scoredOnly = false
+): Promise<Model[]> {
   const collected = new Map<string, Model>();
   const headers: HeadersInit = key.trim() ? { Authorization: `Bearer ${key.trim()}` } : {};
-  for (let offset = 0; ; offset += 100) {
+  for (let offset = 0; offset < 10000; offset += 100) {
     const url = new URL(`https://openrouter.ai/api/v1/models${key.trim() ? '/user' : ''}`);
     url.search = new URLSearchParams({
       limit: '100',
       offset: String(offset),
       output_modalities: 'text',
-      sort: 'intelligence-high-to-low'
+      sort,
+      ...(scoredOnly ? { min_intelligence_index: '0' } : {})
     }).toString();
     const response = await fetch(url.toString(), { headers, signal: AbortSignal.timeout(15_000) });
     if (!response.ok)
@@ -94,9 +108,13 @@ export async function getModels(key = ''): Promise<Model[]> {
     const data = await response.json();
     if (!Array.isArray(data.data))
       throw new Error('The model list could not be read. Refresh to try again.');
+    let added = 0;
     for (const entry of data.data) {
       const parsed = modelSchema.safeParse(entry);
-      if (parsed.success && isTextModel(parsed.data)) collected.set(parsed.data.id, parsed.data);
+      if (parsed.success && isTextModel(parsed.data)) {
+        if (!collected.has(parsed.data.id)) added++;
+        collected.set(parsed.data.id, parsed.data);
+      }
     }
     if (
       data.links?.next === null ||
@@ -104,6 +122,9 @@ export async function getModels(key = ''): Promise<Model[]> {
       (typeof data.total_count === 'number' && offset + data.data.length >= data.total_count)
     )
       break;
+    if (offset > 0 && !added)
+      throw new Error('The model catalogue repeated a page. Please refresh.');
+    if (offset === 9900) throw new Error('The model catalogue was incomplete. Please refresh.');
   }
   return [...collected.values()];
 }

@@ -17,8 +17,19 @@ import {
   type Change
 } from '$lib/domain/project';
 
-import { FUSION_MODEL, type ReasoningEffort } from '$lib/domain/model-settings';
+import {
+  FUSION_MODEL,
+  resolveModelConfiguration,
+  copyFusion,
+  defaultFusion,
+  fusionPlugin,
+  type ModelConfiguration,
+  type FusionConfiguration,
+  type ReasoningEffort,
+  type EffortPreference
+} from '$lib/domain/model-settings';
 import { effectiveEffort, outputAllowance, type Model } from './models';
+import { configurationIssues } from './model-configuration';
 import { requestError } from './errors';
 export { getModels, type Model } from './models';
 
@@ -311,14 +322,8 @@ function schemaFor(task: Task, context: unknown): z.ZodType {
   });
   return z.object({ chains: batch ? z.array(chain).length(batch.count) : z.array(chain).min(1) });
 }
-export function estimate(
-  model: Model | undefined,
-  context: unknown,
-  task: Task,
-  maxOutputTokens = OUTPUT_TOKENS
-): number | null {
-  if (!model) return null;
-  const inputTokens = Math.ceil(
+function inputTokenEstimate(context: unknown, task: Task): number {
+  return Math.ceil(
     (JSON.stringify(context).length +
       JSON.stringify(z.toJSONSchema(schemaFor(task, context))).length +
       instructions[task].length +
@@ -328,6 +333,15 @@ export function estimate(
       1000) /
       2
   );
+}
+export function estimate(
+  model: Model | undefined,
+  context: unknown,
+  task: Task,
+  maxOutputTokens = OUTPUT_TOKENS
+): number | null {
+  if (!model) return null;
+  const inputTokens = inputTokenEstimate(context, task);
   const prompt = Number(model.pricing.prompt),
     completion = Number(model.pricing.completion);
   if (!model.pricing.prompt.trim() || !model.pricing.completion.trim()) return null;
@@ -338,9 +352,11 @@ export function estimate(
 }
 
 export interface RunOptions {
-  reasoningEfforts?: Record<string, ReasoningEffort>;
+  reasoningEfforts?: Record<string, EffortPreference>;
+  fusion?: FusionConfiguration;
 }
 export interface PlannedRequest {
+  configuration: ModelConfiguration;
   reasoningEffort?: ReasoningEffort;
   costBasis?: 'estimate' | 'allowance';
   modelId: string;
@@ -354,6 +370,22 @@ export interface PlannedRequest {
 export interface RequestPlan {
   requests: PlannedRequest[];
   estimatedTotal: number | null;
+  validationErrors: string[];
+}
+export function taskModelStage(task: Task, stage: number): number {
+  return (
+    (
+      {
+        drivers: 1,
+        ratings: 2,
+        hypotheses: 4,
+        chains: 5,
+        coherence: 5,
+        narrative: 6,
+        narrative_edit: 6
+      } as Partial<Record<Task, number>>
+    )[task] ?? (stage === 7 ? 6 : [1, 2, 4, 5, 6].includes(stage) ? stage : 1)
+  );
 }
 export function planRequests(
   p: Project,
@@ -375,17 +407,34 @@ export function planRequests(
     ?.narrative;
   const options = narrativeOptions ?? savedNarrative;
   const requests: PlannedRequest[] = [];
+  const base =
+    retry?.modelConfiguration ??
+    resolveModelConfiguration(p, String(retry?.stage ?? taskModelStage(task, p.stage)));
+  if (retry?.modelId === FUSION_MODEL && !retry.modelConfiguration) base.fusion = defaultFusion();
   for (const modelId of models) {
     const model = catalogue.find((m) => m.id === modelId);
+    const configuration: ModelConfiguration = {
+      ...base,
+      mode: modelId === FUSION_MODEL ? 'fusion' : 'individual',
+      models: modelId === FUSION_MODEL ? [...base.models] : [modelId],
+      writer: modelId === FUSION_MODEL ? base.writer : modelId,
+      efforts: {
+        ...base.efforts,
+        ...(retry?.modelId === modelId
+          ? { [modelId]: retry.reasoningEffort ?? ('provider-default' as const) }
+          : {}),
+        ...runOptions.reasoningEfforts
+      },
+      fusion: copyFusion(runOptions.fusion ?? base.fusion)
+    };
     const reasoningEffort =
       modelId === FUSION_MODEL
-        ? 'high'
-        : effectiveEffort(
-            model,
-            runOptions.reasoningEfforts?.[modelId] ??
-              (retry?.modelId === modelId ? retry.reasoningEffort : undefined) ??
-              p.reasoningEfforts[modelId]
-          );
+        ? configuration.fusion.effort === 'provider-default'
+          ? undefined
+          : configuration.fusion.effort
+        : configuration.efforts[modelId] === 'provider-default'
+          ? undefined
+          : effectiveEffort(model, configuration.efforts[modelId] as ReasoningEffort | undefined);
     if (task === 'chains') {
       const savedBatch = retry ? chainBatchFor(retry.context) : undefined;
       const saved = retry?.context as
@@ -447,6 +496,7 @@ export function planRequests(
           64000
         );
         requests.push({
+          configuration,
           modelId,
           reasoningEffort,
           context,
@@ -485,6 +535,7 @@ export function planRequests(
     scopes.forEach((scope, i) => {
       const context = contextFor(p, task, scope, undefined, options);
       requests.push({
+        configuration,
         modelId,
         reasoningEffort,
         context,
@@ -520,6 +571,23 @@ export function planRequests(
   });
   return {
     requests,
+    validationErrors: [
+      ...new Set(
+        requests.flatMap((request) => {
+          const issues = configurationIssues(request.configuration, catalogue);
+          const model = catalogue.find((model) => model.id === request.modelId);
+          if (
+            model?.context_length &&
+            inputTokenEstimate(request.context, task) + request.maxOutputTokens >
+              model.context_length
+          )
+            issues.push(
+              `${request.modelId} has too little context for this task's estimated input and output allowance. Choose a larger-context model, lower effort or a smaller task scope.`
+            );
+          return issues;
+        })
+      )
+    ],
     estimatedTotal: requests.every((r) => r.estimated !== null)
       ? requests.reduce((sum, r) => sum + r.estimated!, 0)
       : null
@@ -916,6 +984,7 @@ export function launch(
     throw new Error('Choose individual models or Fusion, with no duplicate contributors.');
   if (!plan.requests.length)
     throw new Error('No missing ratings remain in this scope. No requests were sent.');
+  if (plan.validationErrors.length) throw new Error(plan.validationErrors.join(' '));
   if (task === 'narrative' || task === 'narrative_edit') {
     const chain = activeChains(p).find((c) => c.id === targetIds?.[0]);
     if (targetIds?.length !== 1 || models.length !== 1 || !chain)
@@ -946,6 +1015,7 @@ export function launch(
     stage: p.stage,
     task,
     modelId: request.modelId,
+    modelConfiguration: structuredClone(request.configuration),
     reasoningEffort: request.reasoningEffort,
     costBasis: request.costBasis ?? 'estimate',
     promptTemplateVersion:
@@ -1045,25 +1115,7 @@ export function launch(
                       input: messages,
                       max_output_tokens: next.maxOutputTokens,
                       tool_choice: 'required',
-                      plugins: [
-                        {
-                          id: 'fusion',
-                          // OpenRouter's Quality panel; edit this list to change panel members.
-                          /*
-                          analysis_models: [
-                            // Default Quality panel models (as of November 2026)
-                            //'~anthropic/claude-opus-latest',
-                            //'~openai/gpt-sol-latest',
-                            //'~google/gemini-pro-latest'
-                            // Frontier models (as of November 2026)
-                            'anthropic/claude-fable-5.2',
-                            'google/gemini-4-carbon',
-                            '~openai/gpt-astra-latest'
-                          ],
-                          */
-                          reasoning: { effort: 'high' }
-                        }
-                      ]
+                      plugins: [fusionPlugin(next.modelConfiguration?.fusion ?? defaultFusion())]
                     }
                   : {
                       model: next.modelId,

@@ -1,3 +1,4 @@
+import { configurationSummary } from '$lib/ai/model-configuration';
 import { Marked, type Token, type Tokens } from 'marked';
 import { showModeLabels } from '$lib/config/presentation';
 import {
@@ -577,7 +578,7 @@ export function buildReport(p: Project, annotations = false, full = false): Repo
         heading(`${r.task} · ${r.modelId}`, 3),
         text(`${r.status} · Input revision ${r.inputRevision} · ${r.at}`, 'label'),
         text(
-          `Cost: ${r.confirmed === null ? `unknown (${r.costBasis === 'allowance' ? 'budget reservation' : 'estimate'} $${r.estimated.toFixed(4)})` : `$${r.confirmed.toFixed(4)}`}. ${r.resolvedModelId ? `Answered by ${r.resolvedModelId}. ` : ''}${r.reasoningEffort ? `Thinking effort: ${r.reasoningEffort}. ` : ''}${r.modelId === 'openrouter/fusion' ? `Fusion panel ${r.fusionInvoked ? 'consulted' : 'not completed'}. ` : ''}${r.error ?? ''}`
+          `Cost: ${r.confirmed === null ? `unknown (${r.costBasis === 'allowance' ? 'budget reservation' : 'estimate'} $${r.estimated.toFixed(4)})` : `$${r.confirmed.toFixed(4)}`}. ${r.resolvedModelId ? `Answered by ${r.resolvedModelId}. ` : ''}${r.reasoningEffort ? `Thinking effort: ${r.reasoningEffort}. ` : ''}${r.modelConfiguration ? `Saved selection: ${configurationSummary(r.modelConfiguration)}. ` : ''}${r.modelId === 'openrouter/fusion' ? `Fusion panel ${r.fusionInvoked ? 'consulted' : 'not completed'}. ` : ''}${r.error ?? ''}`
         )
       );
     if (!p.runs.length) operations.push(text('No model operations recorded.'));

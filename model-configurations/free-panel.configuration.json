@@ -1,0 +1,26 @@
+{
+  "format": "scenario-designer-models",
+  "schemaVersion": 1,
+  "id": "free-panel",
+  "revision": 1,
+  "name": "Free-model router",
+  "description": "Cost-conscious starting point using OpenRouter\u2019s free-model router. Availability and limits vary.",
+  "reviewedAt": "2026-11-17",
+  "kind": "panel",
+  "configuration": {
+    "mode": "individual",
+    "models": ["openrouter/free"],
+    "writer": "openrouter/free",
+    "efforts": {},
+    "fusion": {
+      "type": "preset",
+      "preset": "quality",
+      "models": [
+        "~anthropic/claude-opus-latest",
+        "~openai/gpt-sol-latest",
+        "~google/gemini-pro-latest"
+      ],
+      "effort": "high"
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "format": "scenario-designer-models",
+  "schemaVersion": 1,
+  "id": "developer-breadth",
+  "revision": 1,
+  "name": "Several model developers",
+  "description": "Separate contributions from Anthropic, OpenAI and Google. Developer breadth does not guarantee independent judgements.",
+  "reviewedAt": "2026-11-17",
+  "kind": "panel",
+  "configuration": {
+    "mode": "individual",
+    "models": [
+      "~anthropic/claude-sonnet-latest",
+      "~openai/gpt-sol-latest",
+      "~google/gemini-pro-latest"
+    ],
+    "writer": "~anthropic/claude-sonnet-latest",
+    "efforts": {},
+    "fusion": {
+      "type": "preset",
+      "preset": "quality",
+      "models": [
+        "~anthropic/claude-opus-latest",
+        "~openai/gpt-sol-latest",
+        "~google/gemini-pro-latest"
+      ],
+      "effort": "high"
+    }
+  }
+}

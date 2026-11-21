@@ -1,0 +1,15 @@
+{
+  "reviewedAt": "2026-11-17",
+  "sourceUrl": "https://artificialanalysis.ai/evaluations/aa-briefcase",
+  "automaticRefreshEnabled": false,
+  "status": "Maintained suggestions. A permitted AA Briefcase feed and publication rights have not been confirmed.",
+  "models": [
+    "~anthropic/claude-sonnet-latest",
+    "mistralai/mistral-large-4-0",
+    "~anthropic/claude-opus-latest",
+    "~openai/gpt-sol-latest",
+    "~google/gemini-pro-latest",
+    "~moonshotai/kimi-latest",
+    "meta/muse-wonder"
+  ]
+}
